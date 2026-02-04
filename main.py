@@ -39,16 +39,9 @@ class PianoTilesApp:
             songs = self.audio_manager.list_songs("assets/music")
             print(f"Starting menu with {len(songs)} songs...")
             
-            # Check for Android environment
-            import platform
-            is_android = 'ANDROID_ARGUMENT' in os.environ
-            
-            if is_android:
-                from src.ui.menu_pygame import run_menu
-                selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager)
-            else:
-                from src.ui.menu_qt import run_menu
-                selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager)
+            # Start Qt Menu directly
+            from src.ui.menu_qt import run_menu
+            selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager)
             
             if selected_song and beats:
                 print(f"Selected: {selected_song} | Difficulty: {difficulty} | Custom: {custom_settings}")
@@ -166,54 +159,7 @@ class PianoTilesApp:
                     elif event.key == pygame.K_ESCAPE:
                         return False
                 
-                # TOUCH SUPPORT (ANDROID)
-                elif event.type == pygame.FINGERDOWN:
-                    # FINGERDOWN x,y are normalized 0-1
-                    x_pixel = event.x * SCREEN_WIDTH
-                    y_pixel = event.y * SCREEN_HEIGHT
-                    action = self.game_engine.handle_click(x_pixel, y_pixel)
-                    
-                    if action == "PAUSE":
-                        self.state_manager.change_state(GameState.PAUSED)
-                        self.audio_manager.pause()
-                        self.game_engine.paused = True
-                    else:
-                        self.game_engine.handle_lane_touch(event.x, self.game_engine.current_game_time)
-                
-                elif event.type == pygame.KEYUP:
-                    if event.key in LANE_KEYS:
-                        lane_idx = LANE_KEYS.index(event.key)
-                        self.game_engine.handle_keyup(lane_idx, self.game_engine.current_game_time)
 
-            elif state == GameState.PAUSED:
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    x, y = event.pos
-                    action = self.game_engine.handle_click(x, y)
-                    if action == "RESUME":
-                        self.game_engine.paused = False
-                        self.is_resuming = True
-                        self.game_engine.countdown = 3
-                        # We need to set countdown start? Engine uses countdown_start for logic?
-                        # In update(), we use main's countdown_start? No, main uses engine.countdown_start.
-                        self.game_engine.countdown_start = pygame.time.get_ticks()
-                        self.state_manager.change_state(GameState.COUNTDOWN)
-                    elif action == "MENU":
-                        self.running = False
-                        self.return_to_menu = True
-                
-                elif event.type == pygame.FINGERDOWN:
-                    x = event.x * SCREEN_WIDTH
-                    y = event.y * SCREEN_HEIGHT
-                    action = self.game_engine.handle_click(x, y)
-                    if action == "RESUME":
-                        self.game_engine.paused = False
-                        self.is_resuming = True
-                        self.game_engine.countdown = 3
-                        self.game_engine.countdown_start = pygame.time.get_ticks()
-                        self.state_manager.change_state(GameState.COUNTDOWN)
-                    elif action == "MENU":
-                        self.running = False
-                        self.return_to_menu = True
         return True
 
     def update(self, dt):

@@ -198,14 +198,7 @@ class GameEngine:
         self.generate_tiles()
         self.is_ready = True
 
-    def handle_touch(self, x_ratio, current_time):
-        """Handle touch input based on X coordinate ratio (0.0 to 1.0)"""
-        # Note: x_ratio comes from touch event, normalized. 
-        # But for pause click, we need pixels OR check before this.
-        # This function seems dedicated to GAMEPLAY notes.
-        # We should check pause in the main event loop or handle_mouse check in Engine.
-        # Let's adding handle_click(x, y) specifically for UI.
-        pass # Moving logic to a new method handle_click
+
         
     def handle_click(self, x, y):
         # Check Pause
