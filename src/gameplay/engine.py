@@ -114,11 +114,12 @@ class Tile:
         screen.blit(tile_surf, (self.x + 2, self.y))
 
 class GameEngine:
-    def __init__(self, screen, song_path, difficulty="Normal", custom_settings=None):
+    def __init__(self, screen, song_path, difficulty="Normal", custom_settings=None, song_duration=0):
         self.screen = screen
         self.song_path = song_path
         self.difficulty = difficulty
         self.custom_settings = custom_settings or {}
+        self.song_duration = song_duration
         self.tiles = []
         self.beat_timestamps = []
         self.score = 0
@@ -318,3 +319,41 @@ class GameEngine:
         diff_font = pygame.font.SysFont("Outfit", 18)
         diff_surf = diff_font.render(f"Difficulty: {self.difficulty}", True, (100, 100, 100))
         self.screen.blit(diff_surf, (10, 10))
+        
+        self.draw_timer(current_time)
+
+    def draw_timer(self, current_time):
+        if self.song_duration <= 0: return
+        
+        # Calculate progress
+        progress = min(1.0, max(0.0, current_time / self.song_duration))
+        remaining = max(0, int(self.song_duration - current_time))
+        
+        # Positioning (Top Right)
+        center_x, center_y = constants.SCREEN_WIDTH - 60, 60
+        radius = 35
+        rect = pygame.Rect(center_x - radius, center_y - radius, radius * 2, radius * 2)
+        
+        # 1. Background Circle (Grey)
+        pygame.draw.circle(self.screen, (40, 40, 40), (center_x, center_y), radius, 5)
+        
+        # 2. Progress Arc (Cyan)
+        # Angle in radians. Start at top (-pi/2) and go clockwise.
+        # pygame.draw.arc uses start_angle, stop_angle.
+        start_angle = -math.pi / 2
+        # Flip progress for clockwise effect: end_angle = start_angle + (progress * 2*pi)
+        # Note: Pygame arcs go counter-clockwise, so we subtract from the start to go "clockwise" visually.
+        end_angle = start_angle - (progress * 2 * math.pi)
+        
+        # Fix: Pygame requires start_angle < stop_angle.
+        # So for a sweep, we use (end_angle, start_angle)
+        pygame.draw.arc(self.screen, COLOR_ACCENT, rect, min(start_angle, end_angle), max(start_angle, end_angle), 6)
+        
+        # 3. Digital Clock
+        minutes = remaining // 60
+        seconds = remaining % 60
+        time_str = f"{minutes:02}:{seconds:02}"
+        font = pygame.font.SysFont("Outfit", 22, bold=True)
+        time_surf = font.render(time_str, True, COLOR_TEXT)
+        # Position to the left of the circle
+        self.screen.blit(time_surf, (center_x - radius - 70, center_y - time_surf.get_height() // 2))

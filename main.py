@@ -71,7 +71,8 @@ class PianoTilesApp:
         
         song_path = os.path.join("assets/music", song_name)
         if self.audio_manager.load_song(song_path):
-            self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings)
+            duration = self.audio_manager.song_duration
+            self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration)
             self.game_engine.set_beats(beats)
             self.state_manager.change_state(GameState.COUNTDOWN)
             print("Game state is now COUNTDOWN")
