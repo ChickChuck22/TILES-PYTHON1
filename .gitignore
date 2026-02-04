@@ -73,6 +73,7 @@ Thumbs.db
 
 # Project Specific
 assets/cache/
+assets/music/*.mp3
 *.log
 src/core/__pycache__/
 src/gameplay/__pycache__/
