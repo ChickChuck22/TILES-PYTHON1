@@ -37,7 +37,7 @@
 
 2. Instale as dependências:
    ```bash
-   pip install pygame PyQt5 librosa numpy
+   pip install -r requirements.txt
    ```
 
 3. Adicione suas músicas:
