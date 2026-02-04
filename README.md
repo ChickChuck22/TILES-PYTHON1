@@ -31,8 +31,8 @@
 ### Passos
 1. Clone este repositório:
    ```bash
-   git clone https://github.com/ChickChuck22/TILES-PYTHON1.git
-   cd TILES-PYTHON1
+   git clone https://github.com/ChickChuck22/TILES-PYTHON.git
+   cd TILES-PYTHON
    ```
 
 2. Instale as dependências:
