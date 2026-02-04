@@ -47,6 +47,32 @@ class BeatDetector:
             tempo, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
             self.beat_times = librosa.frames_to_time(beats, sr=sr).tolist()
             
+            # CLIMAX DETECTION (For Preview)
+            # We calculate RMS energy over the track
+            rms = librosa.feature.rms(y=y)[0]
+            times = librosa.times_like(rms, sr=sr)
+            
+            # Find the window of 5 seconds with max energy
+            window_size_frames = int(5.0 * sr / 512) # hop_length default is 512
+            max_energy = 0
+            best_start_time = 0
+            
+            # Simple sliding window average
+            if len(rms) > window_size_frames:
+                # Use convolution for moving average if available, or simple loop
+                # Just sampling every 1 second is enough for preview finding
+                for i in range(0, len(rms) - window_size_frames, window_size_frames // 5):
+                    chunk_energy = np.sum(rms[i:i+window_size_frames])
+                    if chunk_energy > max_energy:
+                        max_energy = chunk_energy
+                        best_start_time = times[i]
+            
+            # Ensure we don't start at the very end
+            duration = librosa.get_duration(y=y, sr=sr)
+            if best_start_time > duration - 10:
+                best_start_time = 0
+            
+            # Filter beats (keep existing logic)
             filtered_beats = []
             last_time = -1.0
             for t in self.beat_times:
@@ -56,14 +82,21 @@ class BeatDetector:
             
             self.beat_times = filtered_beats
             
+            
+            # Prepare result
+            result = {
+                "beats": self.beat_times,
+                "preview_start": float(best_start_time)
+            }
+            
             # Save to cache
             if progress_callback: progress_callback(90, "Saving to cache...")
             with open(cache_path, 'w') as f:
-                json.dump(self.beat_times, f)
+                json.dump(result, f)
             
             if progress_callback: progress_callback(100, "Ready!")
-            return self.beat_times
+            return result
             
         except Exception as e:
             print(f"Error during beat analysis: {e}")
-            return [i * 0.5 for i in range(1, 100)]
+            return {"beats": [i * 0.5 for i in range(1, 100)], "preview_start": 0.0}
