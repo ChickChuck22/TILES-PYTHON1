@@ -5,6 +5,7 @@ class GameState(Enum):
     LOADING = auto()
     COUNTDOWN = auto()
     GAMEPLAY = auto()
+    PAUSED = auto()
     GAME_OVER = auto()
 
 class StateManager:

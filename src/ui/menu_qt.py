@@ -3,13 +3,13 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsDropShadowEffect, QHBoxLayout, QComboBox,
                              QProgressBar, QFrame, QScrollArea, QSlider)
 from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread, pyqtSlot
-from PyQt5.QtGui import QFont, QColor, QFontMetrics, QPixmap
+from PyQt5.QtGui import QFont, QColor, QFontMetrics, QPixmap, QIcon
 import os
 import sys
 
 class AnalysisThread(QThread):
     progress = pyqtSignal(int, str)
-    finished = pyqtSignal(list)
+    finished = pyqtSignal(object) # Changed from list to object to support dict
 
     def __init__(self, song_path, difficulty):
         super().__init__()
@@ -19,8 +19,8 @@ class AnalysisThread(QThread):
     def run(self):
         from src.core.beat_detector import BeatDetector
         detector = BeatDetector(self.song_path)
-        beats = detector.analyze(self.difficulty, self.report_progress)
-        self.finished.emit(beats)
+        result = detector.analyze(self.difficulty, self.report_progress)
+        self.finished.emit(result)
 
     def report_progress(self, val, msg):
         self.progress.emit(val, msg)
@@ -78,14 +78,16 @@ class SongCard(QFrame):
 class MenuQt(QMainWindow):
     song_ready = pyqtSignal(str, str, list, dict) # name, diff, beats, custom_settings
 
-    def __init__(self, songs):
+    def __init__(self, songs, audio_manager):
         super().__init__()
         self.songs = songs
+        self.audio_manager = audio_manager
         self.selected_song = songs[0] if songs else None
         self.init_ui()
 
     def init_ui(self):
         self.setWindowTitle("Titanium Piano - Music Dashboard")
+        self.setWindowIcon(QIcon("assets/icon.png"))
         self.setFixedSize(1100, 750)
         self.setStyleSheet("background-color: #121212; font-family: 'Segoe UI', sans-serif;")
 
@@ -176,6 +178,46 @@ class MenuQt(QMainWindow):
         hold_l.addWidget(self.hold_slider)
         left_layout.addWidget(hold_box)
 
+        # VOLUME CONTROLS
+        vol_header = QLabel("AUDIO SETTINGS")
+        vol_header.setStyleSheet("color: #00B8D4; font-size: 12px; font-weight: 800; margin-top: 15px;")
+        left_layout.addWidget(vol_header)
+
+        # Music Volume
+        mvol_box = QWidget()
+        mvol_l = QVBoxLayout(mvol_box)
+        mvol_l.setContentsMargins(0,0,0,0)
+        self.mvol_label = QLabel("Music Volume: 100%")
+        self.mvol_label.setStyleSheet("color: #AAA; font-size: 11px;")
+        self.mvol_slider = QSlider(Qt.Horizontal)
+        self.mvol_slider.setRange(0, 100)
+        self.mvol_slider.setValue(100)
+        self.mvol_slider.valueChanged.connect(self.on_mvol_changed)
+        mvol_l.addWidget(self.mvol_label)
+        mvol_l.addWidget(self.mvol_slider)
+        left_layout.addWidget(mvol_box)
+
+        # SFX Volume
+        svol_box = QWidget()
+        svol_l = QVBoxLayout(svol_box)
+        svol_l.setContentsMargins(0,0,0,0)
+        self.svol_label = QLabel("SFX Volume: 100%")
+        self.svol_label.setStyleSheet("color: #AAA; font-size: 11px;")
+        self.svol_slider = QSlider(Qt.Horizontal)
+        self.svol_slider.setRange(0, 100)
+        self.svol_slider.setValue(100)
+        self.svol_slider.valueChanged.connect(self.on_svol_changed)
+        svol_l.addWidget(self.svol_label)
+        svol_l.addWidget(self.svol_slider)
+        left_layout.addWidget(svol_box)
+        
+        # Combo Toggle
+        from PyQt5.QtWidgets import QCheckBox
+        self.combo_check = QCheckBox("Show Combo Text")
+        self.combo_check.setChecked(True)
+        self.combo_check.setStyleSheet("QCheckBox { color: #AAA; spacing: 10px; } QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #555; } QCheckBox::indicator:checked { background-color: #00B8D4; }")
+        left_layout.addWidget(self.combo_check)
+
         left_layout.addStretch()
 
         # Connect diff combo AFTER sliders are created
@@ -248,6 +290,20 @@ class MenuQt(QMainWindow):
     def on_hold_changed(self, v):
         self.hold_label.setText(f"Hold Probability: {v}%")
 
+    def on_mvol_changed(self, v):
+        self.mvol_label.setText(f"Music Volume: {v}%")
+        # Optimization: Don't update mixer on every tick if possible, but for smooth preview it's okay
+        # We need access to audio_manager. Ideally, we pass it or import it.
+        # Since menu runs in main thread, we can use a global or pass it in init.
+        # For now, let's emit a signal or handle it if we have the instance.
+        if hasattr(self, 'audio_manager'):
+            self.audio_manager.set_music_volume(v / 100.0)
+
+    def on_svol_changed(self, v):
+        self.svol_label.setText(f"SFX Volume: {v}%")
+        if hasattr(self, 'audio_manager'):
+            self.audio_manager.set_sfx_volume(v / 100.0)
+
     def sync_sliders_to_preset(self):
         diff = self.diff_combo.currentText()
         presets = {
@@ -269,6 +325,30 @@ class MenuQt(QMainWindow):
         self.selected_song = song_name
         metrics = QFontMetrics(QFont("Segoe UI", 24, QFont.Bold))
         self.song_display.setText(metrics.elidedText(song_name, Qt.ElideRight, 320))
+        
+        # Trigger Preview
+        # We need to analyze quick or get cache to find preview_start
+        # To avoid blocking UI, we could do this in a thread, OR just load cache if exists.
+        song_path = os.path.join("assets/music", song_name)
+        
+        # Quick check cache
+        # We replicate basic hash logic or use BeatDetector
+        from src.core.beat_detector import BeatDetector
+        detector = BeatDetector(song_path)
+        # We don't want to run full analyze here if not cached, too slow.
+        # But we modified BeatDetector to be fast if cached.
+        
+        # Create a worker to fetch preview time so we don't freeze UI
+        self.preview_thread = AnalysisThread(song_path, "Normal") # Difficulty doesn't matter for start time
+        self.preview_thread.finished.connect(self.start_preview)
+        self.preview_thread.start()
+
+    def start_preview(self, result):
+        # Result is a dict now
+        if isinstance(result, dict):
+            start_time = result.get("preview_start", 0.0)
+            song_path = os.path.join("assets/music", self.selected_song)
+            self.audio_manager.play_preview(song_path, start_time)
 
     def on_start_clicked(self):
         self.start_btn.setEnabled(False)
@@ -286,21 +366,28 @@ class MenuQt(QMainWindow):
         self.prog_bar.setValue(val)
         self.prog_label.setText(msg.upper())
 
-    def on_analysis_finished(self, beats):
+    def on_analysis_finished(self, result):
+        beats = []
+        if isinstance(result, dict):
+            beats = result.get("beats", [])
+        elif isinstance(result, list):
+            beats = result
+            
         custom = {
             "speed": self.speed_slider.value(),
             "chord_chance": self.chord_slider.value() / 100.0 if self.chord_slider.value() > 0 else None,
-            "hold_chance": self.hold_slider.value() / 100.0
+            "hold_chance": self.hold_slider.value() / 100.0,
+            "show_combo": self.combo_check.isChecked()
         }
         self.song_ready.emit(self.selected_song, self.diff_combo.currentText(), beats, custom)
         self.close()
 
-def run_menu(songs):
+def run_menu(songs, audio_manager):
     app = QApplication.instance()
     if not app:
         app = QApplication(sys.argv)
     
-    window = MenuQt(songs)
+    window = MenuQt(songs, audio_manager)
     window.show()
     
     result = {"song": None, "diff": "Normal", "beats": [], "custom": {}}
