@@ -1,156 +1,81 @@
+Traceback (most recent call last):
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 60, in start_launcher
+    selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager, self.discord_rpc)
+                                                        ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "d:\Source\repos\TILES-PYTHON\src\ui\modern_menu.py", line 473, in run_menu
+    window = ModernMenuQt(songs, audio_manager, discord_rpc)
+TypeError: ModernMenuQt.__init__() takes 3 positional arguments but 4 were given
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 116, in run_game_loop
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 133, in run_game_loop
     self.update(dt)
     ~~~~~~~~~~~^^^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 179, in update
-    self.game_engine.update(0, dt)
-    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 293, in update
-    snow.update(dt, constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT, snow_pulse)
-    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: SnowParticle.update() takes 4 positional arguments but 5 were given
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 217, in update
+    progress = self.game_engine.get_progress() # Need to implement this
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'GameEngine' object has no attribute 'get_progress'
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 116, in run_game_loop
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 133, in run_game_loop
     self.update(dt)
     ~~~~~~~~~~~^^^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 179, in update
-    self.game_engine.update(0, dt)
-    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 293, in update
-    snow.update(dt, constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT, snow_pulse)
-    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: SnowParticle.update() takes 4 positional arguments but 5 were given
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 217, in update
+    progress = self.game_engine.get_progress() # Need to implement this
+  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 659, in get_progress
+    if not self.audio_manager or self.audio_manager.duration <= 0:
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AudioManager' object has no attribute 'duration'
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 116, in run_game_loop
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 133, in run_game_loop
     self.update(dt)
     ~~~~~~~~~~~^^^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 179, in update
-    self.game_engine.update(0, dt)
-    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 293, in update
-    snow.update(dt, constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT, snow_pulse)
-    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: SnowParticle.update() takes 4 positional arguments but 5 were given
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 217, in update
+    progress = self.game_engine.get_progress() # Need to implement this
+  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 659, in get_progress
+    if not self.audio_manager or self.audio_manager.duration <= 0:
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AudioManager' object has no attribute 'duration'
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 116, in run_game_loop
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 145, in run_game_loop
     self.update(dt)
     ~~~~~~~~~~~^^^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 179, in update
-    self.game_engine.update(0, dt)
-    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 293, in update
-    snow.update(dt, constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT, snow_pulse)
-    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: SnowParticle.update() takes 4 positional arguments but 5 were given
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 238, in update
+    "perfects": self.game_engine.perfects,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'GameEngine' object has no attribute 'perfects'
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 116, in run_game_loop
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 150, in run_game_loop
     self.update(dt)
     ~~~~~~~~~~~^^^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 179, in update
-    self.game_engine.update(0, dt)
-    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 293, in update
-    snow.update(dt, constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT, snow_pulse)
-    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: SnowParticle.update() takes 4 positional arguments but 5 were given
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 243, in update
+    "perfects": self.game_engine.perfects,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'GameEngine' object has no attribute 'perfects'
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 200, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 151, in run_game_loop
+    self.update(dt)
+    ~~~~~~~~~~~^^^^
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 244, in update
+    "perfects": self.game_engine.perfects,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'GameEngine' object has no attribute 'perfects'
 
 Loop Error:
 Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 200, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
-
-Loop Error:
-Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 200, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
-
-Loop Error:
-Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 200, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
-
-Loop Error:
-Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 200, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
-
-Loop Error:
-Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 246, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
-
-Loop Error:
-Traceback (most recent call last):
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 120, in run_game_loop
-    self.draw()
-    ~~~~~~~~~^^
-  File "d:\Source\repos\TILES-PYTHON\main.py", line 246, in draw
-    self.game_engine.draw(current_time)
-    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
-  File "d:\Source\repos\TILES-PYTHON\src\gameplay\engine.py", line 471, in draw
-    if not self.paused and not self.game_over:
-           ^^^^^^^^^^^
-AttributeError: 'GameEngine' object has no attribute 'paused'
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 156, in run_game_loop
+    self.update(dt)
+    ~~~~~~~~~~~^^^^
+  File "d:\Source\repos\TILES-PYTHON\main.py", line 248, in update
+    "perfects": self.game_engine.perfects,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'GameEngine' object has no attribute 'perfects'

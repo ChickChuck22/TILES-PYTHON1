@@ -9,14 +9,24 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from src.core.constants import *
 from src.core.state_manager import StateManager, GameState
 from src.core.audio_manager import AudioManager
+from src.core.discord_rpc import DiscordRPC
 from src.ui.menu_qt import run_menu
 from src.gameplay.engine import GameEngine
+from src.core.settings import SettingsManager
+
+DISCORD_APP_ID = "1469770191582789885"
 
 class PianoTilesApp:
     def __init__(self):
         pygame.init() # Init once here
         self.state_manager = StateManager()
         self.audio_manager = AudioManager()
+        self.settings_manager = SettingsManager()
+        
+        # Discord RPC
+        self.discord_rpc = DiscordRPC(DISCORD_APP_ID)
+        self.discord_rpc.connect()
+        self.discord_rpc.update_menu()
         
         # Load SFX
         sfx_path = os.path.join("assets", "sfx", "tap.wav")
@@ -36,21 +46,48 @@ class PianoTilesApp:
             # Ensure any old display is closed before showing Qt menu
             pygame.display.quit()
             
-            songs = self.audio_manager.list_songs("assets/music")
+            # Load songs from settings + default
+            folders = self.settings_manager.get_music_folders()
+            folders.append("assets/music")
+            print(f"Scanning folders: {folders}")
+            
+            songs = self.audio_manager.scan_library(folders)
             print(f"Starting menu with {len(songs)} songs...")
             
-            # Start Qt Menu directly
-            from src.ui.menu_qt import run_menu
-            selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager)
+            last_results = None
             
-            if selected_song and beats:
-                print(f"Selected: {selected_song} | Difficulty: {difficulty} | Custom: {custom_settings}")
-                self.init_game(selected_song, difficulty, beats, custom_settings)
-                self.run_game_loop()
-            else:
-                print("Launcher exited without selection.")
-                self.cleanup()
-                sys.exit()
+            while True:
+                # Ensure mixer is alive for menu previews
+                if not pygame.mixer.get_init():
+                    try: pygame.mixer.init()
+                    except: pass
+                
+                # Start Qt Menu directly
+                print(f"DEBUG: Calling run_menu with results={last_results}")
+                from src.ui.modern_menu import run_menu
+                selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager, self.discord_rpc, results=last_results)
+                
+                # Reset results after showing them
+                last_results = None 
+                
+                if selected_song:
+                    print(f"Selected: {selected_song} | Difficulty: {difficulty} | Custom: {custom_settings}")
+                    self.init_game(selected_song, difficulty, beats, custom_settings)
+                    last_results = self.run_game_loop()
+                    print(f"DEBUG: Game Loop Ended. Results: {last_results}")
+                    
+                    # Force window close significantly
+                    pygame.display.quit()
+                    pygame.quit()
+                else:
+                    print("Launcher exited without selection.")
+                    self.cleanup()
+                    break
+                    
+        except Exception:
+            traceback.print_exc()
+            input("Press Enter to close...")
+            sys.exit()
         except Exception as e:
             msg = traceback.format_exc()
             with open("crash_log.txt", "w") as f:
@@ -63,14 +100,19 @@ class PianoTilesApp:
         print("Initializing game...")
         if not pygame.get_init():
             pygame.init()
-        pygame.display.init()
         
+        if not pygame.display.get_init():
+            pygame.display.init()
+            
+        # Store metadata for RPC/Results
+        self.selected_song_title = os.path.splitext(os.path.basename(song_name))[0]
+        self.difficulty = difficulty
+
         # Get Monitor Height for vertical maximization
         info = pygame.display.Info()
-        # Set height to monitor height minus a small margin for window borders/taskbar
-        max_h = info.current_h - 100 
+        max_h = info.current_h - 50
         
-        # Update global constant for other modules
+        # We need to update constants before creating screen?
         import src.core.constants as constants
         constants.SCREEN_HEIGHT = max_h
         global SCREEN_HEIGHT
@@ -85,12 +127,15 @@ class PianoTilesApp:
         except Exception as e:
             print(f"Could not load icon: {e}")
 
-        pygame.display.set_caption(f"Playing: {song_name}")
+        pygame.display.set_caption(f"Playing: {self.selected_song_title}")
         self.clock = pygame.time.Clock()
         self.running = True
         self.return_to_menu = False
         
-        song_path = os.path.join("assets/music", song_name)
+        if os.path.isabs(song_name):
+            song_path = song_name
+        else:
+            song_path = os.path.join("assets/music", song_name)
         if self.audio_manager.load_song(song_path):
             duration = self.audio_manager.song_duration
             self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
@@ -103,20 +148,19 @@ class PianoTilesApp:
 
     def run_game_loop(self):
         print("Entering game loop...")
-        frame_count = 0
+        self.running = True
+        self.game_results = None # Store results here
+        
         while self.running:
-            dt = self.clock.tick(FPS) / 1000.0
-            if not self.handle_events():
-                print("Exit signal via events.")
-                break
+            dt = self.clock.tick(60) / 1000.0
             
+            if not self.handle_events():
+                self.running = False
+                
             try:
                 self.update(dt)
                 self.draw()
                 pygame.display.flip()
-                frame_count += 1
-                if frame_count % 300 == 0:
-                    print(f"Loop heartbeat: frame={frame_count} | state={self.state_manager.get_state()}")
             except Exception as e:
                 msg = traceback.format_exc()
                 with open("crash_log.txt", "a") as f:
@@ -155,11 +199,19 @@ class PianoTilesApp:
                     if event.key in LANE_KEYS:
                         lane_idx = LANE_KEYS.index(event.key)
                         # Use engine time for consistency during delay
-                        self.game_engine.handle_keydown(lane_idx, self.game_engine.current_game_time)
+                        self.game_engine.handle_keydown(lane_idx, self.audio_manager.get_pos())
                     elif event.key == pygame.K_ESCAPE:
                         return False
                 
 
+                elif event.type == pygame.KEYUP:
+                    # Map keys to lanes
+                    keys = [pygame.K_d, pygame.K_f, pygame.K_j, pygame.K_k]
+                    if event.key in keys:
+                        lane_index = keys.index(event.key)
+                        if self.game_engine:
+                            self.game_engine.handle_keyup(lane_index, self.audio_manager.get_pos())
+                            
         return True
 
     def update(self, dt):
@@ -180,7 +232,59 @@ class PianoTilesApp:
                 # calculate proper dt
                 self.game_engine.update(0, dt)
                 
+                # Discord RPC Update (Every 5s)
+                now = pygame.time.get_ticks()
+                last_update = getattr(self, 'last_rpc_update', 0)
+                if now - last_update > 5000:
+                    self.last_rpc_update = now
+                    progress = self.game_engine.get_progress()
+                    score = self.game_engine.score
+                    combo = self.game_engine.combo
+                    
+                    self.discord_rpc.update_playing(self.selected_song_title, self.difficulty, progress, score, combo)
+                
                 if self.game_engine.game_over:
+                    # Capture results immediately
+                    if self.game_results is None:
+                        print("Game Over! Collecting stats...")
+                        self.game_results = {
+                            "score": self.game_engine.score,
+                            "max_combo": self.game_engine.max_combo,
+                            "perfects": self.game_engine.perfects,
+                            "goods": self.game_engine.goods,
+                            "misses": self.game_engine.misses,
+                            "song": self.selected_song_title,
+                            "rank": "F" # Calculate rank here or in menu
+                        }
+                        
+                        # Calculating Rank
+                        total_notes = self.game_results["perfects"] + self.game_results["goods"] + self.game_results["misses"]
+                        if total_notes > 0:
+                            accuracy = (self.game_results["perfects"] + self.game_results["goods"] * 0.5) / total_notes
+                        else:
+                            accuracy = 0
+                            
+                        if accuracy >= 0.95: rank = "S"
+                        elif accuracy >= 0.90: rank = "A"
+                        elif accuracy >= 0.80: rank = "B"
+                        elif accuracy >= 0.70: rank = "C"
+                        else: rank = "F"
+                        self.game_results["rank"] = rank
+                        self.game_results["accuracy"] = accuracy * 100
+                        
+                        # RPC Update - Finished
+                        self.discord_rpc.update_results(
+                            self.selected_song_title, 
+                            rank, 
+                            self.game_engine.score, 
+                            self.game_engine.max_combo
+                        )
+
+                        # Small delay before exiting (simulated by not returning immediately if we wanted visuals)
+                        # But for now, let's just exit to show the menu
+                        pygame.time.wait(1000) 
+                        self.running = False
+
                     self.audio_manager.stop()
                     self.state_manager.change_state(GameState.GAME_OVER)
         

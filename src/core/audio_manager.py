@@ -114,10 +114,80 @@ class AudioManager:
         return 0
 
     def list_songs(self, directory):
+        import subprocess # Local import to avoid changing file header for now
+
+        def resolve_shortcut(path):
+            try:
+                cmd = ["powershell", "-command", f"(New-Object -ComObject WScript.Shell).CreateShortcut('{path}').TargetPath"]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                return result.stdout.strip()
+            except:
+                return None
+
         songs = []
         if not os.path.exists(directory):
             os.makedirs(directory)
-        for file in os.listdir(directory):
-            if file.endswith(".mp3"):
-                songs.append(file)
+            
+        # Helper to scan a dir
+        def scan_dir(path):
+            found = []
+            try:
+                for f in os.listdir(path):
+                    full_path = os.path.join(path, f)
+                    if os.path.isdir(full_path):
+                        # Recursive scan? Maybe depth 1 to avoid infinity
+                        pass 
+                    elif f.lower().endswith(('.mp3', '.wav', '.ogg')):
+                        # If inside assets/music, return relative filename
+                        # If external, return absolute path
+                        if os.path.abspath(path) == os.path.abspath(directory):
+                            found.append(f)
+                        else:
+                            found.append(full_path)
+                    elif f.lower().endswith('.lnk'):
+                        target = resolve_shortcut(full_path)
+                        if target and os.path.exists(target):
+                            if os.path.isdir(target):
+                                # Scan the linked folder
+                                try:
+                                    for root, _, files in os.walk(target):
+                                        for file in files:
+                                            if file.lower().endswith(('.mp3', '.wav', '.ogg')):
+                                                found.append(os.path.join(root, file))
+                                except: pass
+                            elif target.lower().endswith(('.mp3', '.wav', '.ogg')):
+                                found.append(target)
+            except: pass
+            return found
+
+        # 1. Scan root
+        songs.extend(scan_dir(directory))
+        
         return songs
+
+    def scan_library(self, folders):
+        """Scans multiple folders and aggregates songs."""
+        all_songs = []
+        seen_paths = set()
+        
+        for folder in folders:
+            if not folder: continue
+            try:
+                folder = os.path.abspath(folder)
+                if not os.path.exists(folder): continue
+
+                print(f"Scanning library folder: {folder}")
+                songs = self.list_songs(folder)
+                
+                for s in songs:
+                    # list_songs returns filenames, so we join
+                    full_path = os.path.join(folder, s)
+                    norm_path = os.path.normpath(full_path)
+                    
+                    if norm_path.lower() not in seen_paths:
+                        all_songs.append(full_path)
+                        seen_paths.add(norm_path.lower())
+            except Exception as e:
+                print(f"Error scanning {folder}: {e}")
+                
+        return all_songs

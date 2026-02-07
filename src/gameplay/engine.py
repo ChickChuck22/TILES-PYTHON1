@@ -7,6 +7,17 @@ import math
 from src.core.messages import COMBO_MESSAGES
 
 class FloatingText:
+    _FONT = None
+
+    @classmethod
+    def get_font(cls):
+        if cls._FONT is None:
+            try:
+                cls._FONT = pygame.font.SysFont("segoeuiemoji", 40, bold=True)
+            except:
+                cls._FONT = pygame.font.SysFont("Arial", 40, bold=True)
+        return cls._FONT
+
     def __init__(self, text, x, y, color):
         self.text = text
         self.x = x
@@ -15,30 +26,38 @@ class FloatingText:
         self.vx = random.uniform(-100, 100)
         self.vy = random.uniform(-300, -150)
         self.alpha = 255
-        self.life = 2.0
+        self.life = 1.5 # Slightly shorter life for snappiness
         self.scale = 1.0
         self.rotation = random.uniform(-15, 15)
+        
+        # Pre-render
+        font = self.get_font()
+        self.base_surf = font.render(text, True, color)
 
     def update(self, dt):
         self.x += self.vx * dt
         self.y += self.vy * dt
-        self.vy += 400 * dt
+        self.vy += 400 * dt # Gravity
         self.life -= dt
-        self.alpha = int((self.life / 2.0) * 255)
-        self.scale = 1.0 + (1.0 - (self.life / 2.0)) * 0.5
+        
+        # Fade out logic
+        if self.life < 0.5:
+             self.alpha = int((self.life / 0.5) * 255)
+        else:
+             self.alpha = 255
+             
+        # Scale down slightly at end
+        self.scale = 1.0 + (max(0, self.life - 1.0) * 0.2)
 
     def draw(self, screen):
         if self.alpha <= 0: return
-        # Attempt to use a font that supports emojis on Windows
-        try:
-            font = pygame.font.SysFont("segoeuiemoji", 40, bold=True)
-        except:
-            font = pygame.font.SysFont("Arial", 40, bold=True)
-            
-        text_surf = font.render(self.text, True, self.color)
-        s = pygame.transform.rotozoom(text_surf, self.rotation, self.scale)
+        
+        # Rotate and Scale
+        # Optimization: Only rotozoom if scale/rotation changed significantly? 
+        # For now, rotozoom is acceptable if we don't re-render text.
+        s = pygame.transform.rotozoom(self.base_surf, self.rotation, self.scale)
         s.set_alpha(self.alpha)
-        rect = s.get_rect(center=(self.x, self.y))
+        rect = s.get_rect(center=(int(self.x), int(self.y)))
         screen.blit(s, rect)
 
 class Particle:
@@ -164,12 +183,19 @@ class GameEngine:
         self.song_path = song_path
         self.difficulty = difficulty
         self.custom_settings = custom_settings or {}
-        self.song_duration = song_duration
+        self.song_duration = float(song_duration)
+        
         self.tiles = []
         self.beat_timestamps = []
         self.score = 0
         self.combo = 0
         self.max_combo = 0
+        self.perfects = 0
+        self.goods = 0
+        self.misses = 0
+        self.health = 100.0 # Standard health logic
+        self.multiplier = 1.0
+        
         self.game_over = False
         self.paused = False
         self.pause_rect = pygame.Rect(20, 20, 50, 50) # Top-Left
@@ -231,13 +257,50 @@ class GameEngine:
             elif self.difficulty == "Insane": chord_chance = 0.25
             else: chord_chance = 0.05
         hold_chance = self.custom_settings.get("hold_chance", 0.15)
-        for timestamp in self.beat_timestamps:
+        
+        last_lane_times = [-10.0] * 4
+        
+        for i, timestamp in enumerate(self.beat_timestamps):
             num_notes = 1
             if random.random() < chord_chance:
                 max_notes = 3 if self.difficulty in ["Impossible", "God", "Beyond"] else 2
                 num_notes = random.randint(2, max_notes)
-            lanes = random.sample(range(4), num_notes)
+            
+            # Smart Lane Selection (Anti-Collision)
+            # Find available lanes where enough time has passed since last note
+            
+            # Dynamic Gap Calculation:
+            # We want to ensure notes don't visually overlap.
+            # Time gap needed = (Tile Height + Padding) / Speed
+            # Tile Height is approx 130.
+            # We use base speed for calculation (worst case).
+            
+            safe_pixel_gap = 140.0 # 130 height + 10 padding
+            dynamic_min_gap = safe_pixel_gap / max(100, self.tile_speed)
+            
+            # Hard limit for physics (never below 0.05s)
+            min_gap = max(0.05, dynamic_min_gap)
+            
+            candidates = [l for l in range(4) if timestamp - last_lane_times[l] >= min_gap]
+            
+            if not candidates:
+                # COLLISION DETECTED -> DELETE NOTE
+                # As requested: "se detectar, deleta"
+                # We simply skip spawning this note.
+                continue
+            
+            # Reduce note count if we don't have enough candidates
+            actual_count = min(num_notes, len(candidates))
+            if actual_count == 0: continue
+            
+            lanes = random.sample(candidates, actual_count)
+            
+            # Update last times
+            for l in lanes:
+                last_lane_times[l] = timestamp
+            
             lane_map.append((timestamp, lanes))
+
         for i, (timestamp, lanes) in enumerate(lane_map):
             for lane in lanes:
                 next_time_in_lane = 9999.0
@@ -261,15 +324,46 @@ class GameEngine:
     def spawn_shoutout(self, text):
         self.floating_texts.append(FloatingText(text, constants.SCREEN_WIDTH // 2, constants.SCREEN_HEIGHT // 2, (255, 255, 0)))
 
+    def increment_combo(self):
+        self.combo += 1
+        if self.combo > self.max_combo:
+            self.max_combo = self.combo
+            
+        if self.combo > 10: self.multiplier = 2.0
+        if self.combo > 50: self.multiplier = 3.0
+        if self.combo > 100: self.multiplier = 4.0
+
+    def reset_combo(self):
+        self.combo = 0
+        self.multiplier = 1.0
+        self.misses += 1
+        # self.health -= 5 # Punishment
+        
+    def register_hit(self, score_add, judgment, x_pos, y_pos):
+        self.score += int(score_add * self.multiplier)
+        self.increment_combo()
+        self.health = min(100, self.health + 2)
+        self.spawn_floating_text(judgment, x_pos, y_pos, (255, 255, 0))
+        
+        if judgment == "PERFECT":
+            self.perfects += 1
+        elif judgment == "GOOD":
+            self.goods += 1
+
     def restart(self):
         self.score = 0
         self.combo = 0
-        self.damage_alpha = 0
-        self.lane_pulses = [0.0] * 4
+        self.max_combo = 0
+        self.perfects = 0
+        self.goods = 0
+        self.misses = 0
+        self.health = 100.0
+        self.multiplier = 1.0
         self.floating_texts = []
         self.game_over = False
         self.countdown = 3
         self.countdown_start = pygame.time.get_ticks()
+        self.last_energy_idx = 0
         for tile in self.tiles:
             tile.clicked = False
             tile.missed = False
@@ -296,6 +390,45 @@ class GameEngine:
                 real_time = music_pos
         
         current_time = real_time
+
+        # --- SMART SPEED LOGIC ---
+        if self.custom_settings.get("smart_speed", False):
+            # Get energy at current_time
+            energy = 0.0
+            profile = self.custom_settings.get("energy_profile", [])
+            
+            # Simple linear search or lookup (optimization: keep index hints)
+            # Profile is sorted by time [[t, e], ...]]
+            # Using binary search or just iterating if small enough.
+            if not hasattr(self, 'last_energy_idx'): self.last_energy_idx = 0
+            
+            idx = self.last_energy_idx
+            while idx < len(profile) - 1 and profile[idx+1][0] < current_time:
+                idx += 1
+            self.last_energy_idx = idx
+            
+            if 0 <= idx < len(profile):
+                # Interpolate
+                t1, e1 = profile[idx]
+                if idx + 1 < len(profile):
+                    t2, e2 = profile[idx+1]
+                    ratio = (current_time - t1) / (t2 - t1) if (t2 - t1) > 0 else 0
+                    ratio = max(0.0, min(1.0, ratio))
+                    energy = e1 + (e2 - e1) * ratio
+                else:
+                    energy = e1
+            
+            # Map Energy 0.0-1.0 to Speed factor 1.0x - 1.7x (User Request)
+            # 0.0 -> 1.0x (Base Speed - Never slower)
+            # 1.0 -> 1.7x (Fast Climax, but readable)
+            speed_factor = 1.0 + (energy * 0.7)
+            
+            # Base speed depends on difficulty too
+            diff_speeds = {"Easy": 350, "Normal": 500, "Hard": 700, "Insane": 900, "Impossible": 1200, "God": 1600, "Beyond": 2100}
+            base_diff_speed = diff_speeds.get(self.difficulty, 500)
+            
+            # Apply
+            self.tile_speed = base_diff_speed * speed_factor
 
         if self.is_ready and self.beat_timestamps and current_time >= self.beat_timestamps[-1] + 2.0:
             self.game_over = True
@@ -365,11 +498,65 @@ class GameEngine:
         tolerance = 120
         target_tile = None
         min_dist = 9999
+        # Logic: Find the closest note to the hit line
+        for tile in self.tiles:
+            if tile.lane == lane_index and not tile.clicked and not tile.missed:
+                # Distance to hit line
+                # Tile Y is the top. The hit line is at SCREEN_HEIGHT - 150.
+                # Ideally we hit when the tile overlaps the line.
+                # Let's assume tile 'center' or 'head' vs line.
+                # Simplified: use tile.y vs hit_line_y
+                dist = abs(tile.y - hit_line_y)
+                if dist < tolerance and dist < min_dist:
+                    min_dist = dist
+                    target_tile = tile
+
+        if target_tile:
+            target_tile.clicked = True
+            target_tile.is_holding = True
+            
+            # Score calculation based on accuracy
+            score_add = 100
+            if min_dist < 20: score_add = 300
+            elif min_dist < 50: score_add = 200
+            
+            self.score += score_add
+            self.spawn_shoutout(str(score_add))
+            self.spawn_particles(lane_index * (constants.SCREEN_WIDTH // 4) + (constants.SCREEN_WIDTH // 8), hit_line_y, (0, 255, 255))
+        else:
+            # Miss (Ghost tap)
+            self.combo = 0
+            self.trigger_damage()
+
+    def handle_keyup(self, lane_index, current_time=None):
+        # Check if we released a hold note too early
+        if current_time is None:
+            current_time = self.get_safe_time()
         for tile in self.tiles:
             if tile.lane == lane_index and tile.is_holding:
+                # We released it!
                 tile.is_holding = False
-                tile.hold_complete = True
-                self.increment_combo()
+                
+                # If it wasn't close enough to the end, it's a fail
+                # But wait, hold_complete is set when it finishes naturally?
+                # No, hold_complete is set in update if duration passed?
+                # Actually, loop logic in update handles score.
+                # If we release, we just stop holding.
+                
+                # User wants "if I release, it continues functioning".
+                # User wants "if I release, it should FAIL".
+                
+                # So if we are here, it means we were holding it, and we released.
+                # Is it done?
+                # We need to know if the tile is "finished".
+                # But usually tile stays is_holding until it passes screen or duration ends?
+                # Let's check `tile.update`.
+                
+                # If we release early, we break combo.
+                self.combo = 0
+                self.damage_alpha = 100
+                self.spawn_floating_text("DROP!", constants.LANE_X_POS[lane_index], constants.SCREEN_HEIGHT - 100, (255, 50, 50))
+                # tile.missed = True # Maybe?
                 break
         for tile in self.tiles:
             if tile.lane == lane_index and not tile.clicked and not tile.missed and not tile.is_holding and not tile.hold_complete:
@@ -504,6 +691,11 @@ class GameEngine:
         pygame.draw.rect(self.screen, (200, 50, 50), self.menu_rect, border_radius=10)
         text_menu = font_btn.render("MENU", True, (255, 255, 255))
         self.screen.blit(text_menu, (self.menu_rect.centerx - text_menu.get_width()//2, self.menu_rect.centery - text_menu.get_height()//2))
+
+    def get_progress(self):
+        if not self.audio_manager or self.audio_manager.song_duration <= 0:
+            return 0.0
+        return (self.audio_manager.get_pos() / self.audio_manager.song_duration) * 100.0
 
     def draw_timer(self, current_time):
         if self.song_duration <= 0: return
