@@ -1,22 +1,26 @@
 import sys
 import os
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QLabel, QPushButton, QHBoxLayout, QStackedWidget, 
-                             QScrollArea, QFrame, QLineEdit, QComboBox, QSlider,
-                             QCheckBox, QProgressBar, QFileDialog, QMessageBox,
-                             QGraphicsDropShadowEffect, QButtonGroup, QDialog, QSizePolicy, QTabWidget)
-from PyQt5.QtCore import Qt, pyqtSignal, QSize, pyqtSlot
-from PyQt5.QtGui import QIcon, QFont, QPixmap, QColor
+import threading
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, 
+    QLabel, QPushButton, QHBoxLayout, QStackedWidget, 
+    QScrollArea, QFrame, QLineEdit, QComboBox, QSlider,
+    QCheckBox, QProgressBar, QFileDialog, QMessageBox,
+    QGraphicsDropShadowEffect, QButtonGroup, QDialog, QSizePolicy, QTabWidget,
+    QListWidget, QListWidgetItem
+)
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, pyqtSlot, QThread, QUrl, QTimer
+from PyQt5.QtGui import QIcon, QFont, QPixmap, QColor, QFontMetrics
 
+# Local imports
 from src.core.settings import SettingsManager
-from src.ui.menu_qt import AnalysisThread # Reuse logic
 import src.ui.styles as styles
 from src.ui.results import ResultsDialog
 from src.ui.widgets import ModernSongCard
 from src.services.discord_rpc import DiscordRPC
 from src.services.spotify_service import SpotifyService
 from src.services.youtube_service import YouTubeService
-
+from src.core.analysis_manager import AnalysisManager, AnalysisThread
 
 
 class ModernMenuQt(QMainWindow):
@@ -34,15 +38,19 @@ class ModernMenuQt(QMainWindow):
              self.discord_rpc.update_menu(len(songs))
         
         self.settings_manager = SettingsManager()
-        self.selected_song = songs[0] if songs else None
+        self.selected_song = songs[0]["path"] if songs else None
+        self.song_cards = {} # TRACK SONG CARDS
         
         # Signal Connections
         self.download_finished_signal.connect(self._finish_yt_download)
         self.download_progress_signal.connect(self._update_yt_progress)
         
+        # Background Analysis
+        self.analysis_manager = None
+        # Toast removed
+        
         if results:
             print("DEBUG: Scheduling show_results...")
-            from PyQt5.QtCore import QTimer
             QTimer.singleShot(500, lambda: self.show_results(results))
         
         # Window Setup
@@ -75,11 +83,24 @@ class ModernMenuQt(QMainWindow):
         self.nav_musics.setChecked(True)
         self.switch_page(0)
         
-        # Initial Logic
-        self.populate_tabs(self.songs)
+        # Initial Logic (This triggers populate_tabs and analysis_manager)
+        self.refresh_library()
         
         if self.selected_song:
             self.select_song(self.selected_song)
+
+    def closeEvent(self, event):
+        """Cleanup threads on exit."""
+        if self.analysis_manager:
+            self.analysis_manager.stop()
+        if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
+            self.preview_thread.stop_flag = True # Add flag if needed, or terminate
+            self.preview_thread.terminate()
+            self.preview_thread.wait()
+        if hasattr(self, 'game_analysis_thread') and isinstance(self.game_analysis_thread, QThread) and self.game_analysis_thread.isRunning():
+            self.game_analysis_thread.terminate()
+            self.game_analysis_thread.wait()
+        event.accept()
 
     def init_sidebar(self):
         sidebar = QWidget()
@@ -206,7 +227,18 @@ class ModernMenuQt(QMainWindow):
                 padding: 10px; color: white; font-size: 14px;
             }}
             QComboBox::drop-down {{ border: none; }}
+            QComboBox QAbstractItemView {{
+                background-color: #252525;
+                color: white;
+                selection-background-color: #444;
+            }}
         """)
+        
+        # Colorize items
+        from PyQt5.QtGui import QColor
+        for i, d in enumerate(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"]):
+            self.diff_combo.setItemData(i, QColor(styles.DIFFICULTY_COLORS[d]), Qt.ForegroundRole)
+            
         self.diff_combo.currentIndexChanged.connect(self.sync_sliders_to_preset)
         
         # Start Button
@@ -674,35 +706,35 @@ class ModernMenuQt(QMainWindow):
                 # We need a persistent manager or keep reference
                 if not hasattr(self, '_nam'): self._nam = QNetworkAccessManager()
                 
-                def on_thumb_loaded(reply, btn=btn_thumb):
+                def on_thumb_loaded(reply, btn_ref):
                     try:
                         if reply.error() != reply.NoError:
                             print(f"Thumb Network Error: {reply.errorString()}")
                             reply.deleteLater()
                             return
-
-                        # Check object validity 
-                        if not btn.isVisible(): pass 
                         
                         data = reply.readAll()
                         pixmap = QPixmap()
                         pixmap.loadFromData(data)
                         if not pixmap.isNull():
-                            icon = QIcon(pixmap)
-                            btn.setIcon(icon)
-                            btn.setIconSize(btn.size())
+                            # Scale to btn size
+                            icon = QIcon(pixmap.scaled(120, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                            btn_ref.setIcon(icon)
+                            btn_ref.setIconSize(btn_ref.size())
                         else:
-                            print("Thumb Error: Pixmap is null (invalid data)")
-                    except RuntimeError:    pass 
-                    except Exception as e:  print(f"Thumb Load Exception: {e}")
-                    
-                    try: reply.deleteLater()
-                    except: pass
+                            print(f"Thumb Error: Pixmap is null for url {reply.url().toString()}")
+                    except Exception as e:
+                        print(f"Thumb Load Exception: {e}")
+                    finally:
+                        reply.deleteLater()
 
                 req = QNetworkRequest(QUrl(vid['thumbnail']))
                 req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
+                req.setHeader(QNetworkRequest.UserAgentHeader, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                
                 reply = self._nam.get(req)
-                reply.finished.connect(lambda r=reply: on_thumb_loaded(r))
+                # Pass btn_thumb explicitly to avoid closure issues
+                reply.finished.connect(lambda r=reply, b=btn_thumb: on_thumb_loaded(r, b))
             except Exception as e:
                 print(f"Network Image Error: {e}")
                 btn_thumb.setText("▶") # Fallback
@@ -787,8 +819,9 @@ class ModernMenuQt(QMainWindow):
         if file_path and os.path.exists(file_path):
             self.yt_status.setText(f"Downloaded: {title}")
             
-            # Refresh library to include new file
-            self.refresh_library()
+            # Refresh ONLY the youtube folder to avoid stutter
+            youtube_path = os.path.join("assets", "music", "youtube")
+            self.refresh_library(folder_to_scan=youtube_path)
             
             # Select the new song
             self.select_song(file_path)
@@ -827,6 +860,10 @@ class ModernMenuQt(QMainWindow):
         self.lbl_selected.setStyleSheet(f"font-size: 18px; color: {styles.COLOR_ACCENT}; font-weight: bold;")
         
         # Preview Logic
+        if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
+            self.preview_thread.terminate()
+            self.preview_thread.wait()
+            
         self.preview_thread = AnalysisThread(song_path, "Normal")
         self.preview_thread.finished.connect(self.start_preview)
         self.preview_thread.start()
@@ -841,10 +878,15 @@ class ModernMenuQt(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_start.setText("ANALYZING...")
         
-        self.thread = AnalysisThread(self.selected_song, self.diff_combo.currentText())
-        self.thread.progress.connect(lambda v, m: self.prog_bar.setValue(v))
-        self.thread.finished.connect(self.on_analysis_finished)
-        self.thread.start()
+        # Stop preview before starting game analysis to avoid collisions
+        if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
+            self.preview_thread.terminate()
+            self.preview_thread.wait()
+
+        self.game_analysis_thread = AnalysisThread(self.selected_song, self.diff_combo.currentText())
+        self.game_analysis_thread.progress.connect(lambda v, m: self.prog_bar.setValue(int(v)))
+        self.game_analysis_thread.finished.connect(self.on_analysis_finished)
+        self.game_analysis_thread.start()
 
     def on_analysis_finished(self, result):
         beats = result.get("beats", []) if isinstance(result, dict) else result
@@ -863,7 +905,30 @@ class ModernMenuQt(QMainWindow):
         if dlg.exec_():
              self.refresh_library()
 
-    def refresh_library(self):
+    def refresh_library(self, folder_to_scan=None):
+        if folder_to_scan:
+            # Incremental refresh
+            print(f"DEBUG: Incremental refresh for {folder_to_scan}")
+            new_songs = self.audio_manager.scan_library([folder_to_scan])
+            
+            # Filter what we already have
+            actually_new = []
+            seen = {os.path.normpath(s).lower() for s in self.songs}
+            for s in new_songs:
+                if os.path.normpath(s).lower() not in seen:
+                    actually_new.append(s)
+            
+            if actually_new:
+                print(f"DEBUG: Found {len(actually_new)} NEW songs.")
+                self.songs.extend(actually_new)
+                self.add_songs_to_ui(actually_new)
+                
+                # Add to background analysis queue
+                if self.analysis_manager:
+                    actually_new_paths = [s["path"] for s in actually_new]
+                    self.analysis_manager.add_songs(actually_new_paths)
+            return
+
         # Re-scan all configured folders plus our assets/music structure
         folders = self.settings_manager.get_music_folders()
         folders.append("assets/music")
@@ -874,6 +939,58 @@ class ModernMenuQt(QMainWindow):
         self.songs = self.audio_manager.scan_library(folders)
         print(f"DEBUG: Scanned {len(self.songs)} songs.")
         self.populate_tabs(self.songs)
+        
+        # Start Background Analysis
+        if self.analysis_manager:
+            self.analysis_manager.stop()
+            self.analysis_manager.wait()
+            
+        song_paths = [s["path"] for s in self.songs]
+        self.analysis_manager = AnalysisManager(song_paths)
+        self.analysis_manager.worker.progress.connect(self.on_analysis_progress)
+        self.analysis_manager.worker.finished.connect(self.on_analysis_step_finished)
+        self.analysis_manager.worker.diff_finished.connect(self.on_diff_finished)
+        # self.analysis_manager.worker.all_finished.connect(self.on_all_analysis_finished)
+        self.analysis_manager.start()
+        
+    def on_analysis_progress(self, song_path, val):
+        if song_path in self.song_cards:
+            self.song_cards[song_path].set_analysis_progress(val)
+        else:
+            # Fallback for path mismatch (e.g. forward/back slashes)
+            norm_path = os.path.normpath(song_path)
+            for k, card in self.song_cards.items():
+                if os.path.normpath(k) == norm_path:
+                    card.set_analysis_progress(val)
+                    return
+            print(f"DEBUG: Could not find card for {song_path}")
+        
+    def on_analysis_step_finished(self, song_path):
+        if song_path in self.song_cards:
+            self.song_cards[song_path].set_analysis_progress(-1)
+        else:
+            norm_path = os.path.normpath(song_path)
+            for k, card in self.song_cards.items():
+                if os.path.normpath(k) == norm_path:
+                    card.set_analysis_progress(-1)
+                    return
+
+    def on_diff_finished(self, song_path, difficulty):
+        # Update the stripes on the card
+        if song_path in self.song_cards:
+            card = self.song_cards[song_path]
+            if difficulty not in card.cached_diffs:
+                card.update_cached_diffs(card.cached_diffs + [difficulty])
+        else:
+            norm_path = os.path.normpath(song_path)
+            for k, card in self.song_cards.items():
+                if os.path.normpath(k) == norm_path:
+                    if difficulty not in card.cached_diffs:
+                        card.update_cached_diffs(card.cached_diffs + [difficulty])
+                    return
+        
+    def on_all_analysis_finished(self):
+        pass
 
     def populate_tabs(self, songs):
         print(f"DEBUG: Populating tabs with {len(songs)} songs...")
@@ -892,12 +1009,14 @@ class ModernMenuQt(QMainWindow):
         self.tab_youtube_dl.cards = []
         
         # Populate
-        for song in songs:
-            card = ModernSongCard(song)
+        self.song_cards = {} # Reset map
+        for song_data in songs:
+            card = ModernSongCard(song_data)
             card.clicked.connect(self.select_song)
+            self.song_cards[song_data["path"]] = card
             
-            norm = os.path.normpath(song).lower() 
-            name = os.path.basename(song)
+            norm = os.path.normpath(song_data["path"]).lower() 
+            name = os.path.basename(song_data["path"])
             
             # Simple heuristic based on path
             if "youtube" in norm:
@@ -914,6 +1033,33 @@ class ModernMenuQt(QMainWindow):
         self.grid_locals.addStretch()
         self.grid_spotify.addStretch()
         self.grid_youtube.addStretch()
+
+    def add_songs_to_ui(self, songs):
+        """Incrementally adds cards to the UI without a full clear."""
+        for song_data in songs:
+            if song_data["path"] in self.song_cards: continue
+            
+            card = ModernSongCard(song_data)
+            card.clicked.connect(self.select_song)
+            self.song_cards[song_data["path"]] = card
+            
+            norm = os.path.normpath(song_data["path"]).lower()
+            name = os.path.basename(song_data["path"])
+            
+            # Removestretch temporarily? No, layouts often have stretch at end.
+            # Grid layouts in this app are actually QVBoxLayout with addWidget.
+            # But the 'grid' variables are QVBoxLayouts.
+            
+            if "youtube" in norm:
+                # Insert BEFORE the stretch
+                self.grid_youtube.insertWidget(self.grid_youtube.count()-1, card)
+                self.tab_youtube_dl.cards.append((name, card))
+            elif "spotify" in norm:
+                self.grid_spotify.insertWidget(self.grid_spotify.count()-1, card)
+                self.tab_spotify_dl.cards.append((name, card))
+            else:
+                self.grid_locals.insertWidget(self.grid_locals.count()-1, card)
+                self.tab_locals.cards.append((name, card))
 
     # Sliders logic
     def on_speed_changed(self, v): 

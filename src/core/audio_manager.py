@@ -1,6 +1,8 @@
 import pygame
 import os
+import json
 from mutagen.mp3 import MP3
+from mutagen import File as MutagenFile
 
 class AudioManager:
     def __init__(self):
@@ -165,8 +167,44 @@ class AudioManager:
         
         return songs
 
+    def get_metadata(self, path):
+        """Extracts artist, title, and duration from a file."""
+        metadata = {
+            "title": os.path.splitext(os.path.basename(path))[0],
+            "artist": "Unknown Artist",
+            "duration": "--:--"
+        }
+        
+        try:
+            audio = MutagenFile(path)
+            if audio:
+                # Duration
+                length = audio.info.length
+                mins = int(length // 60)
+                secs = int(length % 60)
+                metadata["duration"] = f"{mins}:{secs:02d}"
+                
+                # Tags (generic)
+                if hasattr(audio, 'tags') and audio.tags:
+                    # Try common tag names
+                    artist = audio.get('artist') or audio.get('TPE1') or audio.get('TPE2')
+                    title = audio.get('title') or audio.get('TIT2')
+                    
+                    if artist: 
+                        # mutagen returns lists/objects often
+                        if isinstance(artist, list): metadata["artist"] = str(artist[0])
+                        else: metadata["artist"] = str(artist)
+                        
+                    if title:
+                        if isinstance(title, list): metadata["title"] = str(title[0])
+                        else: metadata["title"] = str(title)
+        except Exception as e:
+            print(f"Error reading metadata for {path}: {e}")
+            
+        return metadata
+
     def scan_library(self, folders):
-        """Scans multiple folders and aggregates songs."""
+        """Scans multiple folders and returns list of dicts with path and metadata."""
         all_songs = []
         seen_paths = set()
         
@@ -180,12 +218,15 @@ class AudioManager:
                 songs = self.list_songs(folder)
                 
                 for s in songs:
-                    # list_songs returns filenames, so we join
                     full_path = os.path.join(folder, s)
                     norm_path = os.path.normpath(full_path)
                     
                     if norm_path.lower() not in seen_paths:
-                        all_songs.append(full_path)
+                        metadata = self.get_metadata(full_path)
+                        all_songs.append({
+                            "path": full_path,
+                            **metadata
+                        })
                         seen_paths.add(norm_path.lower())
             except Exception as e:
                 print(f"Error scanning {folder}: {e}")

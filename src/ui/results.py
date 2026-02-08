@@ -11,7 +11,7 @@ class ResultsDialog(QDialog):
         self.setModal(True)
         self.setFixedSize(600, 500)
         self.setStyleSheet(f"""
-            QDialog {{ background-color: {styles.COLOR_BG}; border: 2px solid {styles.COLOR_DOCS}; border-radius: 15px; }}
+            QDialog {{ background-color: {styles.COLOR_BG}; border: 2px solid {styles.COLOR_ACCENT}; border-radius: 15px; }}
             QLabel {{ color: white; }}
         """)
         

@@ -1,19 +1,16 @@
-import pygame
 import sys
 import os
 import traceback
+import pygame
+from dotenv import load_dotenv
 
-# Add src to path just in case
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
+# Local imports
 from src.core.constants import *
 from src.core.state_manager import StateManager, GameState
 from src.core.audio_manager import AudioManager
 from src.services.discord_rpc import DiscordRPC
-from src.ui.menu_qt import run_menu
 from src.gameplay.engine import GameEngine
 from src.core.settings import SettingsManager
-from dotenv import load_dotenv
 
 load_dotenv() # Load environment variables
 
@@ -36,8 +33,6 @@ class PianoTilesApp:
         self.audio_manager.load_sfx("tap", sfx_path)
         
         self.game_engine = None
-        self.screen = None
-        self.clock = None
         self.screen = None
         self.clock = None
         self.running = True
@@ -81,9 +76,9 @@ class PianoTilesApp:
                     last_results = self.run_game_loop()
                     print(f"DEBUG: Game Loop Ended. Results: {last_results}")
                     
-                    # Force window close significantly
+                    # Force window close so Qt can take over
                     pygame.display.quit()
-                    pygame.quit()
+                    # Do NOT call pygame.quit() here as it kills the mixer and global state
                 else:
                     print("Launcher exited without selection.")
                     self.cleanup()

@@ -219,7 +219,8 @@ class BeatDetector:
             return result
             
         except Exception as e:
-            print(f"Error during beat analysis: {e}")
-            import traceback
-            traceback.print_exc()
+            if not isinstance(e, RuntimeError):
+                print(f"Error during beat analysis: {e}")
+                import traceback
+                traceback.print_exc()
             return {"beats": [i * 0.5 for i in range(1, 100)], "preview_start": 0.0}

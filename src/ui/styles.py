@@ -16,6 +16,16 @@ FONT_SIZE_HEADER = "18px"
 FONT_SIZE_NORMAL = "14px"
 FONT_SIZE_SMALL = "12px"
 
+DIFFICULTY_COLORS = {
+    "Easy": "#4CAF50",
+    "Normal": "#2196F3",
+    "Hard": "#FFEB3B",
+    "Insane": "#FF9800",
+    "Impossible": "#F44336",
+    "God": "#9C27B0",
+    "Beyond": "#E91E63"
+}
+
 GLOBAL_STYLES = f"""
     QMainWindow {{
         background-color: {COLOR_BG};
