@@ -9,10 +9,13 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from src.core.constants import *
 from src.core.state_manager import StateManager, GameState
 from src.core.audio_manager import AudioManager
-from src.core.discord_rpc import DiscordRPC
+from src.services.discord_rpc import DiscordRPC
 from src.ui.menu_qt import run_menu
 from src.gameplay.engine import GameEngine
 from src.core.settings import SettingsManager
+from dotenv import load_dotenv
+
+load_dotenv() # Load environment variables
 
 DISCORD_APP_ID = "1469770191582789885"
 
@@ -49,6 +52,8 @@ class PianoTilesApp:
             # Load songs from settings + default
             folders = self.settings_manager.get_music_folders()
             folders.append("assets/music")
+            folders.append(os.path.join("assets", "music", "youtube"))
+            folders.append(os.path.join("assets", "music", "spotify"))
             print(f"Scanning folders: {folders}")
             
             songs = self.audio_manager.scan_library(folders)
@@ -98,11 +103,14 @@ class PianoTilesApp:
 
     def init_game(self, song_name, difficulty, beats, custom_settings):
         print("Initializing game...")
+        
+        # Force re-init display to avoid "video system not initialized" after Qt
+        if pygame.display.get_init():
+            pygame.display.quit()
+        pygame.display.init()
+            
         if not pygame.get_init():
             pygame.init()
-        
-        if not pygame.display.get_init():
-            pygame.display.init()
             
         # Store metadata for RPC/Results
         self.selected_song_title = os.path.splitext(os.path.basename(song_name))[0]
@@ -172,6 +180,7 @@ class PianoTilesApp:
         self.audio_manager.stop()
         if self.return_to_menu:
             self.start_launcher()
+        return self.game_results
 
     def handle_events(self):
         for event in pygame.event.get():

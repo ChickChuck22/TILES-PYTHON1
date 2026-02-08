@@ -1,6 +1,7 @@
 # Project Specific
 assets/cache/
 assets/music/*.mp3
+assets/music/youtube/*.mp3
 *.log
 crash_log.txt
 generate_sfx.py

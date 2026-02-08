@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QPushButton, QHBoxLayout, QStackedWidget, 
                              QScrollArea, QFrame, QLineEdit, QComboBox, QSlider,
                              QCheckBox, QProgressBar, QFileDialog, QMessageBox,
-                             QGraphicsDropShadowEffect, QButtonGroup, QDialog)
+                             QGraphicsDropShadowEffect, QButtonGroup, QDialog, QSizePolicy, QTabWidget)
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, pyqtSlot
 from PyQt5.QtGui import QIcon, QFont, QPixmap, QColor
 
@@ -13,11 +13,16 @@ from src.ui.menu_qt import AnalysisThread # Reuse logic
 import src.ui.styles as styles
 from src.ui.results import ResultsDialog
 from src.ui.widgets import ModernSongCard
+from src.services.discord_rpc import DiscordRPC
+from src.services.spotify_service import SpotifyService
+from src.services.youtube_service import YouTubeService
 
 
 
 class ModernMenuQt(QMainWindow):
     song_ready = pyqtSignal(str, str, list, dict) 
+    download_finished_signal = pyqtSignal(str, str)
+    download_progress_signal = pyqtSignal(float)
 
     def __init__(self, songs, audio_manager, discord_rpc=None, results=None):
         super().__init__()
@@ -30,6 +35,10 @@ class ModernMenuQt(QMainWindow):
         
         self.settings_manager = SettingsManager()
         self.selected_song = songs[0] if songs else None
+        
+        # Signal Connections
+        self.download_finished_signal.connect(self._finish_yt_download)
+        self.download_progress_signal.connect(self._update_yt_progress)
         
         if results:
             print("DEBUG: Scheduling show_results...")
@@ -59,12 +68,16 @@ class ModernMenuQt(QMainWindow):
         self.init_play_page()
         self.init_mods_page()
         self.init_system_page()
+        self.init_spotify_page()
+        self.init_youtube_page()
         
         # Wire up
-        self.nav_play.setChecked(True)
+        self.nav_musics.setChecked(True)
         self.switch_page(0)
         
         # Initial Logic
+        self.populate_tabs(self.songs)
+        
         if self.selected_song:
             self.select_song(self.selected_song)
 
@@ -95,9 +108,11 @@ class ModernMenuQt(QMainWindow):
             layout.addWidget(btn)
             return btn
             
-        self.nav_play = create_nav_btn("🎮  PLAY", 0)
+        self.nav_musics = create_nav_btn("🎵  MUSICS", 0)
         self.nav_mods = create_nav_btn("🛠️  MODIFIERS", 1)
         self.nav_sys = create_nav_btn("⚙️  SYSTEM", 2)
+        self.nav_spotify_dl = create_nav_btn("🟢  SPOTIFY DL", 3)
+        self.nav_youtube_dl = create_nav_btn("🔴  YOUTUBE DL", 4)
         
         layout.addStretch()
         
@@ -113,50 +128,66 @@ class ModernMenuQt(QMainWindow):
         self.stack.setCurrentIndex(idx)
 
     def init_play_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(20)
+        # Container for the Musics Page
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # Header + Search
-        top_bar = QHBoxLayout()
-        header = QLabel("Select Song")
-        header.setStyleSheet(f"font-size: 28px; font-weight: bold; color: {styles.COLOR_TEXT_PRIMARY};")
+        # Header
+        header = QLabel("MUSIC LIBRARY")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {styles.COLOR_TEXT_PRIMARY}; margin: 20px;")
+        layout.addWidget(header)
         
-        self.search_bar = QLineEdit()
-        self.search_bar.setPlaceholderText("🔍  Search library...")
-        self.search_bar.setFixedWidth(300)
-        self.search_bar.setStyleSheet(styles.INPUT_STYLE)
-        self.search_bar.textChanged.connect(self.filter_songs)
+        # Tabs
+        self.music_tabs = QTabWidget()
+        self.music_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 0; }
+            QTabBar::tab {
+                background: #222;
+                color: #AAA;
+                padding: 12px 40px;
+                min-width: 120px;
+                font-weight: bold;
+                font-size: 14px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #333;
+                color: white;
+                border-bottom: 2px solid #00F0FF;
+            }
+            QTabBar::tab:hover {
+                background: #2A2A2A;
+            }
+        """)
         
-        top_bar.addWidget(header)
-        top_bar.addStretch()
-        top_bar.addWidget(self.search_bar)
-        layout.addLayout(top_bar)
+        # Tab 1: LOCALS
+        self.tab_locals = QWidget()
+        self.grid_locals = self.create_song_tab(self.tab_locals, "Local Files")
+        self.music_tabs.addTab(self.tab_locals, "LOCALS")
         
-        # Song List (Scroll)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("background: transparent; border: none;")
+        # Tab 2: SPOTIFY (Downloads)
+        self.tab_spotify_dl = QWidget()
+        self.grid_spotify = self.create_song_tab(self.tab_spotify_dl, "Spotify Downloads")
+        self.music_tabs.addTab(self.tab_spotify_dl, "SPOTIFY")
         
-        content = QWidget()
-        self.song_grid = QVBoxLayout(content)
-        self.song_grid.setSpacing(15)
-        self.song_grid.setContentsMargins(0, 0, 20, 0) # Right padding for scrollbar
+        # Tab 3: YOUTUBE (Downloads)
+        self.tab_youtube_dl = QWidget()
+        self.grid_youtube = self.create_song_tab(self.tab_youtube_dl, "YouTube Downloads")
+        self.music_tabs.addTab(self.tab_youtube_dl, "YOUTUBE")
         
-        self.song_cards = {}
-        for song in self.songs:
-            card = ModernSongCard(song)
-            card.clicked.connect(self.select_song)
-            self.song_grid.addWidget(card)
-            self.song_cards[song] = card
-            
-        self.song_grid.addStretch()
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
+        layout.addWidget(self.music_tabs)
         
-        # Bottom Controls (Difficulty + Start)
-        bottom = QHBoxLayout()
+        # Common Bottom Controls (Difficulty + Start) - Shared across all tabs?
+        # Or should each tab have its own start?
+        # Shared is better for consistency.
+        
+        bottom_container = QWidget()
+        bottom = QHBoxLayout(bottom_container)
+        bottom.setContentsMargins(40, 20, 40, 20)
         bottom.setSpacing(20)
         
         # Selected Song Display
@@ -190,17 +221,67 @@ class ModernMenuQt(QMainWindow):
         bottom.addWidget(self.diff_combo)
         bottom.addWidget(self.btn_start)
         
-        layout.addLayout(bottom)
+        layout.addWidget(bottom_container)
         
-        # Progress (Overlay or integrated?)
-        # Let's add a small bar above buttons
+        # Integrated Progress Bar
         self.prog_bar = QProgressBar()
         self.prog_bar.setFixedHeight(4)
         self.prog_bar.setTextVisible(False)
         self.prog_bar.setStyleSheet(f"QProgressBar {{ background: #333; border: none; }} QProgressBar::chunk {{ background: {styles.COLOR_ACCENT}; }}")
-        layout.insertWidget(layout.count()-1, self.prog_bar)
+        layout.addWidget(self.prog_bar)
         
-        self.stack.addWidget(page)
+        self.stack.addWidget(container)
+
+    def create_song_tab(self, page, placeholder_text):
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 20, 20, 0)
+        layout.setSpacing(20)
+        
+        # Search Bar specific to this tab? 
+        # Or filters self.song_cards?
+        # If we have 3 grids, we need 3 lists of cards.
+        # Let's add a search bar here.
+        
+        search_bar = QLineEdit()
+        search_bar.setPlaceholderText(f"🔍  Search {placeholder_text}...")
+        search_bar.setStyleSheet(styles.INPUT_STYLE)
+        # We need to filter THIS grid.
+        # Defining a closure for filtering
+        
+        layout.addWidget(search_bar)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        content = QWidget()
+        grid = QVBoxLayout(content)
+        grid.setSpacing(10)
+        grid.addStretch()
+        
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        
+        # Store reference to grid for population
+        # Return layout to caller?
+        
+        # We need to hook up search.
+        # This requires storing the cards for THIS tab.
+        # Let's attach them to the layout object or page object.
+        page.cards = [] # List of (name, widget)
+        
+        def filter_tab(text):
+            text = text.lower().strip()
+            for name, widget in page.cards:
+                if text in name.lower():
+                    widget.setVisible(True)
+                else:
+                    widget.setVisible(False)
+                    
+        search_bar.textChanged.connect(filter_tab)
+        
+        return grid
+
 
     def init_mods_page(self):
         page = QWidget()
@@ -306,6 +387,428 @@ class ModernMenuQt(QMainWindow):
         layout.addStretch()
         self.stack.addWidget(page)
 
+    # --- Reverting init_locals_tab is not needed as init_play_page now does it all --- 
+    # But clean up the method if unused. For now, let's just make ensure init_spotify/youtube are pages again.
+
+    def init_spotify_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        
+        # Header
+        header = QLabel("Spotify Downloader")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #1DB954;")
+        layout.addWidget(header)
+        
+        self.spotify_service = SpotifyService()
+        
+        # Connect Button (Initial State)
+        self.spotify_login_btn = QPushButton("Connect with Spotify")
+        self.spotify_login_btn.setFixedSize(200, 50)
+        self.spotify_login_btn.setCursor(Qt.PointingHandCursor)
+        self.spotify_login_btn.setStyleSheet("background-color: #1DB954; color: white; border-radius: 25px; font-weight: bold;")
+        self.spotify_login_btn.clicked.connect(self.login_spotify)
+        layout.addWidget(self.spotify_login_btn, alignment=Qt.AlignCenter)
+        
+        # Content Area (Hidden until login)
+        self.spotify_content = QWidget()
+        self.spotify_content.setVisible(False)
+        content_layout = QVBoxLayout(self.spotify_content)
+        content_layout.setContentsMargins(0,0,0,0)
+        
+        # Playlists Combo
+        self.playlist_combo = QComboBox()
+        self.playlist_combo.setStyleSheet(styles.INPUT_STYLE)
+        self.playlist_combo.currentIndexChanged.connect(self.load_spotify_tracks_from_combo)
+        content_layout.addWidget(QLabel("Select Playlist:"))
+        content_layout.addWidget(self.playlist_combo)
+        
+        # Tracks List
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        tracks_widget = QWidget()
+        self.spotify_tracks_layout = QVBoxLayout(tracks_widget)
+        self.spotify_tracks_layout.setSpacing(10)
+        self.spotify_tracks_layout.addStretch()
+        
+        scroll.setWidget(tracks_widget)
+        content_layout.addWidget(scroll)
+        
+        layout.addWidget(self.spotify_content)
+        self.stack.addWidget(page)
+
+    def init_youtube_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+        
+        # Header
+        header = QLabel("YouTube Downloader")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000;")
+        layout.addWidget(header)
+        
+        self.youtube_service = YouTubeService()
+        
+        # Search Bar
+        search_layout = QHBoxLayout()
+        self.yt_search_input = QLineEdit()
+        self.yt_search_input.setPlaceholderText("Search YouTube...")
+        self.yt_search_input.setStyleSheet(styles.INPUT_STYLE)
+        self.yt_search_input.returnPressed.connect(self.search_youtube)
+        
+        btn_search = QPushButton("Search")
+        btn_search.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        btn_search.clicked.connect(self.search_youtube)
+        
+        search_layout.addWidget(self.yt_search_input)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+        
+        # Results Area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        self.yt_results_widget = QWidget()
+        self.yt_results_layout = QVBoxLayout(self.yt_results_widget)
+        self.yt_results_layout.setSpacing(15)
+        self.yt_results_layout.addStretch()
+        
+        scroll.setWidget(self.yt_results_widget)
+        layout.addWidget(scroll)
+        
+        # Status Label
+        self.yt_status = QLabel("")
+        self.yt_status.setStyleSheet("color: #AAA; font-style: italic;")
+        layout.addWidget(self.yt_status)
+        
+        # Download Progress
+        self.yt_progress = QProgressBar()
+        self.yt_progress.setTextVisible(False)
+        self.yt_progress.setFixedHeight(6)
+        self.yt_progress.setStyleSheet(f"QProgressBar {{ background: #333; border: none; border-radius: 3px; }} QProgressBar::chunk {{ background: {styles.COLOR_ACCENT}; border-radius: 3px; }}")
+        self.yt_progress.setValue(0)
+        self.yt_progress.setVisible(False)
+        layout.addWidget(self.yt_progress)
+        
+        self.stack.addWidget(page)
+
+    def login_spotify(self):
+        self.spotify_login_btn.setText("Connecting...")
+        self.spotify_login_btn.setEnabled(False)
+        
+        # Simplified sync for now as authentication might open browser
+        # In a real app, use threading to prevent freeze
+        try:
+            success = self.spotify_service.authenticate()
+        except: success = False
+        
+        if success:
+            self.spotify_login_btn.setVisible(False)
+            self.spotify_content.setVisible(True)
+            self.load_spotify_playlists()
+        else:
+            self.spotify_login_btn.setText("Connection Failed. Check .env")
+            self.spotify_login_btn.setEnabled(True)
+
+    def load_spotify_playlists(self):
+        playlists = self.spotify_service.get_playlists()
+        self.playlist_combo.clear()
+        self.spotify_playlists_data = playlists
+        
+        for p in playlists:
+            self.playlist_combo.addItem(f"{p['name']} ({p['tracks_total']} tracks)", p['id'])
+
+    def load_spotify_tracks_from_combo(self, idx):
+        if idx < 0: return
+        playlist_id = self.spotify_combo_data(idx)
+        if not playlist_id: return
+        
+        # Clear tracks
+        while self.spotify_tracks_layout.count():
+            c = self.spotify_tracks_layout.takeAt(0)
+            if c.widget(): c.widget().deleteLater()
+            
+        tracks = self.spotify_service.get_playlist_tracks(playlist_id)
+        
+        for t in tracks:
+            # Create a simple card for each track
+            card = QFrame()
+            card.setStyleSheet("background: #222; border-radius: 8px; padding: 10px;")
+            card.setFixedHeight(60)
+            cl = QHBoxLayout(card)
+            cl.setContentsMargins(5,5,5,5)
+            
+            # Simple Image Load (Blocking - should be async in prod)
+            # if t['image']: ...
+            
+            lbl = QLabel(f"{t['name']} - {t['artist']}")
+            lbl.setStyleSheet("color: white; font-size: 14px;")
+            cl.addWidget(lbl)
+            
+            if t['preview_url']:
+                btn_preview = QPushButton("▶")
+                btn_preview.setFixedSize(30, 30)
+                btn_preview.setStyleSheet("background: #1DB954; color: white; border-radius: 15px;")
+                # Use lambda default arg to capture track url
+                btn_preview.clicked.connect(lambda _, url=t['preview_url']: self.play_spotify_preview(url))
+                cl.addWidget(btn_preview)
+            
+            self.spotify_tracks_layout.insertWidget(self.spotify_tracks_layout.count()-1, card)
+
+    def spotify_combo_data(self, idx):
+        if 0 <= idx < len(self.spotify_playlists_data):
+            return self.spotify_playlists_data[idx]['id']
+        return None
+
+    def play_spotify_preview(self, url):
+        print(f"Playing Preview: {url}")
+        import webbrowser
+        webbrowser.open(url)
+
+    def init_youtube_tab(self, page):
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+        
+        # Header
+        header = QLabel("YouTube Downloads")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000;")
+        layout.addWidget(header)
+        
+        self.youtube_service = YouTubeService()
+        
+        # Search Bar
+        search_layout = QHBoxLayout()
+        self.yt_search_input = QLineEdit()
+        self.yt_search_input.setPlaceholderText("Search YouTube...")
+        self.yt_search_input.setStyleSheet(styles.INPUT_STYLE)
+        self.yt_search_input.returnPressed.connect(self.search_youtube)
+        
+        btn_search = QPushButton("Search")
+        btn_search.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        btn_search.clicked.connect(self.search_youtube)
+        
+        search_layout.addWidget(self.yt_search_input)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+        
+        # Results Area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        self.yt_results_widget = QWidget()
+        self.yt_results_layout = QVBoxLayout(self.yt_results_widget)
+        self.yt_results_layout.setSpacing(15)
+        self.yt_results_layout.addStretch()
+        
+        scroll.setWidget(self.yt_results_widget)
+        layout.addWidget(scroll)
+        
+        # Status Label
+        self.yt_status = QLabel("")
+        self.yt_status.setStyleSheet("color: #AAA; font-style: italic;")
+        layout.addWidget(self.yt_status)
+
+    def search_youtube(self):
+        query = self.yt_search_input.text().strip()
+        if not query: return
+        
+        self.yt_status.setText("Searching...")
+        self.yt_search_input.setEnabled(False)
+        
+        # Thread search
+        import threading
+        def _search():
+            results = self.youtube_service.search(query)
+            # We need to signal back to UI thread. 
+            # For simplicity in this edit, we'll assume a method to update UI exists or use QTimer hacks if needed.
+            # But here we can use QMetaObject.invokeMethod if we had slot, or just QTimer.singleShot(0, ...)
+            # Let's try to update self.latest_yt_results and trigger update via QTimer
+            self.latest_yt_results = results
+            # Trigger update on main thread? 
+            # Actually, let's just do sync search for now to avoid crashing with threading issues if not handled perfectly.
+            # It will freeze UI for a second but is safer for this specific edit context.
+            pass
+
+        # Doing SYNC search for stability in this prompt context
+        try:
+             results = self.youtube_service.search(query)
+             self.display_youtube_results(results)
+             self.yt_status.setText(f"Found {len(results)} results.")
+        except Exception as e:
+             self.yt_status.setText(f"Error: {e}")
+        
+        self.yt_search_input.setEnabled(True)
+
+    def display_youtube_results(self, results):
+        # Clear previous
+        while self.yt_results_layout.count():
+            c = self.yt_results_layout.takeAt(0)
+            if c.widget(): c.widget().deleteLater()
+            
+        for vid in results:
+            card = QFrame()
+            card.setStyleSheet("background: #222; border-radius: 8px; padding: 10px;")
+            card.setMinimumHeight(100) # Allow expansion
+            
+            h = QHBoxLayout(card)
+            h.setContentsMargins(5,5,5,5)
+            h.setSpacing(15)
+            
+            # Thumbnail Button (Clickable)
+            btn_thumb = QPushButton()
+            btn_thumb.setFixedSize(120, 70) 
+            btn_thumb.setCursor(Qt.PointingHandCursor)
+            btn_thumb.setStyleSheet("background-color: #000; border: none; border-radius: 4px;")
+            btn_thumb.clicked.connect(lambda _, vid_id=vid['id'], title=vid['title']: self.download_and_play_youtube(vid_id, title))
+            
+            # Async Thumb Loading
+            try:
+                from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
+                from PyQt5.QtCore import QUrl
+                
+                # We need a persistent manager or keep reference
+                if not hasattr(self, '_nam'): self._nam = QNetworkAccessManager()
+                
+                def on_thumb_loaded(reply, btn=btn_thumb):
+                    try:
+                        if reply.error() != reply.NoError:
+                            print(f"Thumb Network Error: {reply.errorString()}")
+                            reply.deleteLater()
+                            return
+
+                        # Check object validity 
+                        if not btn.isVisible(): pass 
+                        
+                        data = reply.readAll()
+                        pixmap = QPixmap()
+                        pixmap.loadFromData(data)
+                        if not pixmap.isNull():
+                            icon = QIcon(pixmap)
+                            btn.setIcon(icon)
+                            btn.setIconSize(btn.size())
+                        else:
+                            print("Thumb Error: Pixmap is null (invalid data)")
+                    except RuntimeError:    pass 
+                    except Exception as e:  print(f"Thumb Load Exception: {e}")
+                    
+                    try: reply.deleteLater()
+                    except: pass
+
+                req = QNetworkRequest(QUrl(vid['thumbnail']))
+                req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
+                reply = self._nam.get(req)
+                reply.finished.connect(lambda r=reply: on_thumb_loaded(r))
+            except Exception as e:
+                print(f"Network Image Error: {e}")
+                btn_thumb.setText("▶") # Fallback
+                
+            h.addWidget(btn_thumb)
+            
+            # Text Info
+            v = QVBoxLayout()
+            v.setSpacing(5)
+            
+            title = QLabel(vid['title'])
+            title.setStyleSheet("color: white; font-weight: bold; font-size: 14px;")
+            title.setWordWrap(True) 
+            title.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            # Ensure it expands
+            title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+            
+            uploader = QLabel(f"{vid['uploader']} • {vid['duration']}s")
+            uploader.setStyleSheet("color: #AAA; font-size: 12px;")
+            uploader.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            
+            v.addWidget(title)
+            v.addWidget(uploader)
+            v.addStretch()
+            h.addLayout(v, stretch=1) # Give text more space
+            
+            # Play Button
+            btn_dl = QPushButton("PLAY")
+            btn_dl.setFixedSize(80, 40)
+            btn_dl.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+            btn_dl.setCursor(Qt.PointingHandCursor)
+            btn_dl.clicked.connect(lambda _, vid_id=vid['id'], title=vid['title']: self.download_and_play_youtube(vid_id, title))
+            h.addWidget(btn_dl)
+            
+            self.yt_results_layout.insertWidget(self.yt_results_layout.count()-1, card)
+
+    def download_and_play_youtube(self, video_id, title):
+        self.yt_status.setText(f"Downloading '{title}'... Please wait.")
+        self.yt_progress.setVisible(True)
+        self.yt_progress.setValue(0)
+        
+        # We need a slot for thread-safety updates
+        # Since we are in a lambda/thread scope, we can use QMetaObject or signals.
+        # But for simplicity in this structure without defining a new signal on the class (which requires restart),
+        # we can use a small helper with QTimer or assume direct update works if called from hook (it might warn but often works in pyqt).
+        # BETTER: Use a defined signal. But I can't easily add a signal to the class definition dynamically.
+        # SAFE APPROACH: Use QTimer to poll or a thread-safe wrapper.
+        
+        # Actually, let's define a method on self that is thread-safe via QMetaObject.invokeMethod?
+        # Or just use the fact that I can't add signals now.
+        # Let's use a simple detailed approach:
+        
+    def download_and_play_youtube(self, video_id, title):
+        self.yt_status.setText(f"Downloading '{title}'... Please wait.")
+        self.yt_progress.setVisible(True)
+        self.yt_progress.setValue(0)
+        
+        # Use signals for thread safety
+        def update_prog(val):
+            # Emit signal from background thread (safe in PyQt)
+            self.download_progress_signal.emit(float(val))
+            
+        def on_done(file_path):
+            # Emit signal
+            self.download_finished_signal.emit(str(file_path) if file_path else "", title)
+            
+        self.youtube_service.download_audio(video_id, on_done, progress_callback=update_prog)
+
+    def _update_yt_progress(self, val):
+        self.yt_progress.setValue(int(val))
+
+    def _finish_yt_download(self, file_path, title):
+        print(f"DEBUG: _finish_yt_download called with path={file_path}")
+        # Update progress to 100% just in case
+        self.yt_progress.setValue(100)
+        
+        # Hide after a delay so user sees completion
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(1500, lambda: self.yt_progress.setVisible(False))
+        
+        # self.stack.setEnabled(True)
+        if file_path and os.path.exists(file_path):
+            self.yt_status.setText(f"Downloaded: {title}")
+            
+            # Refresh library to include new file
+            self.refresh_library()
+            
+            # Select the new song
+            self.select_song(file_path)
+            
+            # Switch to "Musics" page (index 0) and "YouTube" tab (index 2)
+            self.nav_musics.setChecked(True)
+            self.switch_page(0)
+            self.music_tabs.setCurrentIndex(2) # 0=Locals, 1=Spotify, 2=YouTube
+            
+            # Scroll to it? (Hard with current layout, but selection highlights it)
+            
+            # Notify user via status or popup?
+            # For now, just switching to library is enough "Play on the spot" enabler
+            # If they want IMMEDIATE play, we could still auto-start, but user said 
+            # "add a play button to play on the spot", implying maybe a choice?
+            # But earlier they said "loop downloading". Let's stick to showing it in library.
+            
+        else:
+            self.yt_status.setText("Download failed. Check implementation.")
+
     # --- Logic Methods (Copied/Adapted from MenuQt) ---
     
     def filter_songs(self, text):
@@ -356,22 +859,61 @@ class ModernMenuQt(QMainWindow):
         
     def open_library_manager(self):
         from src.ui.menu_qt import MusicLibraryDialog 
-        # We can reuse the dialog or reimplement nicely. Reusing for now.
         dlg = MusicLibraryDialog(self.settings_manager, self)
         if dlg.exec_():
-             # Refresh logic
-             self.songs = self.audio_manager.scan_library(self.settings_manager.get_music_folders())
-             # Rebuild grid... (Simplified: just clear and add)
-             while self.song_grid.count():
-                 c = self.song_grid.takeAt(0)
-                 if c.widget(): c.widget().deleteLater()
-             self.song_cards = {}
-             for song in self.songs:
-                card = ModernSongCard(song)
-                card.clicked.connect(self.select_song)
-                self.song_grid.addWidget(card)
-                self.song_cards[song] = card
-             self.song_grid.addStretch()
+             self.refresh_library()
+
+    def refresh_library(self):
+        # Re-scan all configured folders plus our assets/music structure
+        folders = self.settings_manager.get_music_folders()
+        folders.append("assets/music")
+        folders.append(os.path.join("assets", "music", "youtube"))
+        folders.append(os.path.join("assets", "music", "spotify"))
+        
+        print(f"DEBUG: Refreshing library from {folders}")
+        self.songs = self.audio_manager.scan_library(folders)
+        print(f"DEBUG: Scanned {len(self.songs)} songs.")
+        self.populate_tabs(self.songs)
+
+    def populate_tabs(self, songs):
+        print(f"DEBUG: Populating tabs with {len(songs)} songs...")
+        # Clear existing
+        def clear_layout(layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+        
+        clear_layout(self.grid_locals)
+        clear_layout(self.grid_spotify)
+        clear_layout(self.grid_youtube)
+        
+        self.tab_locals.cards = []
+        self.tab_spotify_dl.cards = []
+        self.tab_youtube_dl.cards = []
+        
+        # Populate
+        for song in songs:
+            card = ModernSongCard(song)
+            card.clicked.connect(self.select_song)
+            
+            norm = os.path.normpath(song).lower() 
+            name = os.path.basename(song)
+            
+            # Simple heuristic based on path
+            if "youtube" in norm:
+                self.grid_youtube.addWidget(card)
+                self.tab_youtube_dl.cards.append((name, card))
+            elif "spotify" in norm:
+                self.grid_spotify.addWidget(card)
+                self.tab_spotify_dl.cards.append((name, card))
+            else:
+                self.grid_locals.addWidget(card)
+                self.tab_locals.cards.append((name, card)) # Everything else is local
+                
+        # Add stretches
+        self.grid_locals.addStretch()
+        self.grid_spotify.addStretch()
+        self.grid_youtube.addStretch()
 
     # Sliders logic
     def on_speed_changed(self, v): 
@@ -422,6 +964,7 @@ class ModernMenuQt(QMainWindow):
             
     def update_stars(self):
         pass
+
 
     def show_results(self, results):
         print(f"DEBUG: Showing Results Dialog for {results.get('song')}")

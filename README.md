@@ -44,6 +44,35 @@ python main.py
 
 ---
 
+## 🎵 Configuração do Spotify (Opcional)
+
+Para habilitar a integração com o Spotify:
+1. Renomeie o arquivo `.env.example` para `.env` (se já não o fez).
+2. Adicione suas credenciais do Spotify no arquivo `.env`:
+   ```env
+   SPOTIPY_CLIENT_ID='seu_client_id'
+   SPOTIPY_CLIENT_SECRET='seu_client_secret'
+   SPOTIPY_REDIRECT_URI='http://127.0.0.1:8888/callback'
+   ```
+3. O jogo irá carregar suas playlists automaticamente se as credenciais estiverem corretas.
+
+---
+
+## 🎥 Configuração do YouTube (FFmpeg)
+
+Para baixar músicas do YouTube, o jogo precisa do **FFmpeg**.
+Se a instalação automática falhar (erro de espaço ou permissão), faça manualmente:
+
+1. Baixe o FFmpeg (Essentials Build): [Download aqui (gyan.dev)](https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip)
+2. Abra o arquivo ZIP.
+3. Entre na pasta `bin`.
+4. Copie os arquivos `ffmpeg.exe` **E** `ffprobe.exe`.
+5. Cole na pasta `bin` que eu criei na raiz do projeto.
+
+O jogo precisa de ambos para converter o áudio.
+
+---
+
 ## 🪟 Compilação para Windows (.exe)
 
 Você pode criar um executável standalone usando o script incluso.
