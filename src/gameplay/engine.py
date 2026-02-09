@@ -13,9 +13,9 @@ class FloatingText:
     def get_font(cls):
         if cls._FONT is None:
             try:
-                cls._FONT = pygame.font.SysFont("segoeuiemoji", 40, bold=True)
+                cls._FONT = pygame.font.SysFont("Outfit", 28, bold=True)
             except:
-                cls._FONT = pygame.font.SysFont("Arial", 40, bold=True)
+                cls._FONT = pygame.font.SysFont("Arial", 28, bold=True)
         return cls._FONT
 
     def __init__(self, text, x, y, color):
@@ -148,7 +148,7 @@ class Tile:
                 self.hold_complete = True
             return
         if self.clicked or self.hold_complete:
-            self.opacity = max(0, self.opacity - 800 * dt)
+            self.opacity = max(0, self.opacity - 400 * dt)
             return
         time_diff = current_time - self.spawn_time
         self.y = hit_line_y + (time_diff * speed)
@@ -324,31 +324,32 @@ class GameEngine:
     def spawn_shoutout(self, text):
         self.floating_texts.append(FloatingText(text, constants.SCREEN_WIDTH // 2, constants.SCREEN_HEIGHT // 2, (255, 255, 0)))
 
-    def increment_combo(self):
-        self.combo += 1
-        if self.combo > self.max_combo:
-            self.max_combo = self.combo
-            
-        if self.combo > 10: self.multiplier = 2.0
-        if self.combo > 50: self.multiplier = 3.0
-        if self.combo > 100: self.multiplier = 4.0
 
     def reset_combo(self):
         self.combo = 0
         self.multiplier = 1.0
-        self.misses += 1
         # self.health -= 5 # Punishment
         
     def register_hit(self, score_add, judgment, x_pos, y_pos):
         self.score += int(score_add * self.multiplier)
         self.increment_combo()
         self.health = min(100, self.health + 2)
-        self.spawn_floating_text(judgment, x_pos, y_pos, (255, 255, 0))
         
+        # Color based on judgment
+        text_color = (255, 215, 0) # Gold
         if judgment == "PERFECT":
             self.perfects += 1
+            text_color = (50, 255, 50) # Green (Matches Note)
         elif judgment == "GOOD":
             self.goods += 1
+            text_color = (0, 184, 212) # Blue/Cyan
+            
+        print(f"DEBUG HIT: {judgment} | Score: {self.score} | Combo: {self.combo}")
+        self.spawn_floating_text(judgment, x_pos, y_pos, text_color)
+        self.spawn_particles(x_pos, y_pos, text_color)
+
+    def spawn_floating_text(self, text, x, y, color):
+        self.floating_texts.append(FloatingText(text, x, y, color))
 
     def restart(self):
         self.score = 0
@@ -467,11 +468,22 @@ class GameEngine:
             if tile.is_holding:
                 self.score += int(100 * dt)
             if was_holding and tile.hold_complete:
-                self.increment_combo()
+                # Do NOT call increment_combo here again if handle_keyup already did it.
+                # But Natural Finish (no keyup) needs it?
+                # Actually, natural finishes are rare if player is holding.
+                # Let's ensure it's only called once.
+                if not tile.clicked: # Re-use clicked for 'stats_registered' on natural finish
+                     tile.clicked = True
+                     self.increment_combo()
+                     self.perfects += 1 # Natural complete = perfect
+                     self.spawn_floating_text("PERFECT", tile.x + LANE_WIDTH//2, constants.SCREEN_HEIGHT-150, (50, 255, 50))
+            
             if not tile.clicked and not tile.missed and not tile.is_holding and not tile.hold_complete:
-                if tile.y > constants.SCREEN_HEIGHT:
+                # Tighten miss threshold: 50 pixels past line
+                if tile.y > constants.SCREEN_HEIGHT - 100:
                     tile.missed = True
                     self.trigger_damage()
+                    print(f"DEBUG MISS: Lane {tile.lane}")
         self.particles = [p for p in self.particles if p.life > 0]
         for p in self.particles: p.update(dt)
         self.floating_texts = [t for t in self.floating_texts if t.life > 0]
@@ -491,111 +503,68 @@ class GameEngine:
     def trigger_damage(self):
         self.damage_alpha = 180
         self.combo = 0
+        self.multiplier = 1.0
+        self.misses += 1
 
     def handle_keydown(self, lane_index, current_time):
         self.lane_pulses[lane_index] = 1.0
         hit_line_y = constants.SCREEN_HEIGHT - 150
-        tolerance = 120
+        tolerance = 100 # Tightened from 120
         target_tile = None
-        min_dist = 9999
+        min_dist = 999
+        
         # Logic: Find the closest note to the hit line
         for tile in self.tiles:
             if tile.lane == lane_index and not tile.clicked and not tile.missed:
-                # Distance to hit line
-                # Tile Y is the top. The hit line is at SCREEN_HEIGHT - 150.
-                # Ideally we hit when the tile overlaps the line.
-                # Let's assume tile 'center' or 'head' vs line.
-                # Simplified: use tile.y vs hit_line_y
                 dist = abs(tile.y - hit_line_y)
                 if dist < tolerance and dist < min_dist:
                     min_dist = dist
                     target_tile = tile
 
         if target_tile:
-            target_tile.clicked = True
-            target_tile.is_holding = True
-            
-            # Score calculation based on accuracy
-            score_add = 100
-            if min_dist < 20: score_add = 300
-            elif min_dist < 50: score_add = 200
-            
-            self.score += score_add
-            self.spawn_shoutout(str(score_add))
-            self.spawn_particles(lane_index * (constants.SCREEN_WIDTH // 4) + (constants.SCREEN_WIDTH // 8), hit_line_y, (0, 255, 255))
-        else:
-            # Miss (Ghost tap)
-            self.combo = 0
-            self.trigger_damage()
-
-    def handle_keyup(self, lane_index, current_time=None):
-        # Check if we released a hold note too early
-        if current_time is None:
-            current_time = self.get_safe_time()
-        for tile in self.tiles:
-            if tile.lane == lane_index and tile.is_holding:
-                # We released it!
-                tile.is_holding = False
-                
-                # If it wasn't close enough to the end, it's a fail
-                # But wait, hold_complete is set when it finishes naturally?
-                # No, hold_complete is set in update if duration passed?
-                # Actually, loop logic in update handles score.
-                # If we release, we just stop holding.
-                
-                # User wants "if I release, it continues functioning".
-                # User wants "if I release, it should FAIL".
-                
-                # So if we are here, it means we were holding it, and we released.
-                # Is it done?
-                # We need to know if the tile is "finished".
-                # But usually tile stays is_holding until it passes screen or duration ends?
-                # Let's check `tile.update`.
-                
-                # If we release early, we break combo.
-                self.combo = 0
-                self.damage_alpha = 100
-                self.spawn_floating_text("DROP!", constants.LANE_X_POS[lane_index], constants.SCREEN_HEIGHT - 100, (255, 50, 50))
-                # tile.missed = True # Maybe?
-                break
-        for tile in self.tiles:
-            if tile.lane == lane_index and not tile.clicked and not tile.missed and not tile.is_holding and not tile.hold_complete:
-                dist = abs(tile.y - hit_line_y)
-                if dist < min_dist:
-                    min_dist = dist
-                    target_tile = tile
-        if target_tile and min_dist < tolerance:
             if target_tile.duration > 0:
+                # Hold note start
                 target_tile.is_holding = True
                 target_tile.hit_time_audio = current_time
+                # Window for perfect: 25 pixels
+                judgment = "PERFECT" if min_dist < 25 else "GOOD"
+                self.register_hit(50, judgment, target_tile.x + LANE_WIDTH//2, hit_line_y)
+                if self.audio_manager: self.audio_manager.play_sfx("tap")
             else:
+                # Tap note
                 target_tile.clicked = True
-                self.score += 10
-                self.increment_combo()
-                if self.audio_manager:
-                    self.audio_manager.play_sfx("tap")
-            color = (0, 184, 212) if self.combo < 10 else (255, 215, 0)
-            self.spawn_particles(target_tile.x + LANE_WIDTH//2, hit_line_y, color)
-            return True
-        self.trigger_damage()
-        return False
+                judgment = "PERFECT" if min_dist < 25 else "GOOD"
+                score_add = 300 if judgment == "PERFECT" else 150
+                self.register_hit(score_add, judgment, target_tile.x + LANE_WIDTH//2, hit_line_y)
+                if self.audio_manager: self.audio_manager.play_sfx("tap")
+        else:
+            # Ghost tap (Miss)
+            print(f"DEBUG GHOST TAP: Lane {lane_index}")
+            self.trigger_damage()
+            self.spawn_floating_text("MISS!", lane_index * LANE_WIDTH + LANE_WIDTH//2, hit_line_y, (255, 50, 50))
 
     def handle_keyup(self, lane_index, current_time):
+        if current_time is None: return
         for tile in self.tiles:
             if tile.lane == lane_index and tile.is_holding:
-                if current_time >= tile.end_time - 0.1:
+                # If we release near the end, it's a success
+                if current_time >= tile.end_time - 0.2: # Slightly more lenient window
                     tile.is_holding = False
                     tile.hold_complete = True
-                    self.increment_combo()
+                    # HOLDS now count as PERFECT for accuracy/stats
+                    self.register_hit(150, "PERFECT", tile.x + LANE_WIDTH//2, constants.SCREEN_HEIGHT-150)
                 else:
+                    # Early release - Break combo
                     tile.is_holding = False
                     tile.missed = True
                     self.trigger_damage()
+                    self.spawn_floating_text("DROP!", tile.x + LANE_WIDTH//2, constants.SCREEN_HEIGHT-150, (255, 50, 50))
                 return
 
     def increment_combo(self):
         self.combo += 1
         self.max_combo = max(self.combo, self.max_combo)
+        self.multiplier = 1.0 + (min(self.combo, 100) / 25.0) # Up to 5x multiplier
         self.combo_scale = 1.5
         
         show_combo = self.custom_settings.get("show_combo", True)
@@ -650,8 +619,6 @@ class GameEngine:
         diff_surf = diff_font.render(f"Difficulty: {self.difficulty}", True, (100, 100, 100))
         self.screen.blit(diff_surf, (10, 10))
         
-        self.draw_timer(current_time)
-
         self.draw_timer(current_time)
         
         # Draw Pause Button (only if not paused, or maybe always?)

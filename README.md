@@ -57,7 +57,9 @@ O projeto conta com um sistema de build profissional para gerar um instalador Wi
    python build_tools/windows/build.py
    ```
 2. **Gerar Instalador**:
-   - O script detectará automaticamente o **Inno Setup** e gerará um arquivo `.exe` instalável na pasta `dist/`.
+   - O script detectará automaticamente o **Inno Setup**.
+   - **Dica Portátil**: Você pode colocar os arquivos do Inno Setup em `build_tools/InnoSetup/` para gerar instaladores em qualquer PC sem precisar instalar nada!
+   - O arquivo instalador `.exe` será gerado na pasta `dist/`.
 
 ---
 

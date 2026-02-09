@@ -816,7 +816,7 @@ class ModernMenuQt(QMainWindow):
         QTimer.singleShot(1500, lambda: self.yt_progress.setVisible(False))
         
         # self.stack.setEnabled(True)
-        if file_path and os.path.exists(file_path):
+        if file_path and not str(file_path).startswith("ERROR:") and os.path.exists(file_path):
             self.yt_status.setText(f"Downloaded: {title}")
             
             # Refresh ONLY the youtube folder to avoid stutter
@@ -840,7 +840,12 @@ class ModernMenuQt(QMainWindow):
             # But earlier they said "loop downloading". Let's stick to showing it in library.
             
         else:
-            self.yt_status.setText("Download failed. Check implementation.")
+            if str(file_path).startswith("ERROR:"):
+                # Extract actual msg
+                msg = str(file_path).replace("ERROR:", "").strip()
+                self.yt_status.setText(f"Download error: {msg}")
+            else:
+                self.yt_status.setText("Download failed. Check implementation.")
 
     # --- Logic Methods (Copied/Adapted from MenuQt) ---
     
@@ -900,7 +905,7 @@ class ModernMenuQt(QMainWindow):
         self.song_ready.emit(self.selected_song, self.diff_combo.currentText(), beats, custom)
         
     def open_library_manager(self):
-        from src.ui.menu_qt import MusicLibraryDialog 
+        from src.ui.library_dialog import MusicLibraryDialog 
         dlg = MusicLibraryDialog(self.settings_manager, self)
         if dlg.exec_():
              self.refresh_library()
@@ -913,9 +918,9 @@ class ModernMenuQt(QMainWindow):
             
             # Filter what we already have
             actually_new = []
-            seen = {os.path.normpath(s).lower() for s in self.songs}
+            seen = {os.path.normpath(s["path"]).lower() for s in self.songs}
             for s in new_songs:
-                if os.path.normpath(s).lower() not in seen:
+                if os.path.normpath(s["path"]).lower() not in seen:
                     actually_new.append(s)
             
             if actually_new:

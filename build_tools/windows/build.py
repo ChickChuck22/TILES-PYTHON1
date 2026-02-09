@@ -27,6 +27,7 @@ args = [
     # Add data folders (source:destination)
     f'--add-data={os.path.join(BASE_DIR, "assets")}{os.pathsep}assets',
     f'--add-data={os.path.join(BASE_DIR, "src")}{os.pathsep}src',
+    f'--add-data={os.path.join(BASE_DIR, "bin")}{os.pathsep}bin',
     
     # Imports hidden (sometimes needed for dynamic imports)
     '--hidden-import=pygame',
@@ -44,9 +45,22 @@ print(f"\nBuild complete! Executable is in: {DIST_DIR}")
 
 # Optional: Try to run Inno Setup Compiler if available
 import subprocess
-iscc_path = r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-if os.path.exists(iscc_path):
-    print("\nFound Inno Setup! Generating installer...")
+
+# Priority: 1. Project-local InnoSetup, 2. Default System Path
+possible_iscc = [
+    os.path.join(BASE_DIR, "build_tools", "InnoSetup", "ISCC.exe"),
+    r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+]
+
+iscc_path = None
+for path in possible_iscc:
+    if os.path.exists(path):
+        iscc_path = path
+        break
+
+if iscc_path:
+    print(f"\nFound Inno Setup at: {iscc_path}")
+    print("Generating installer...")
     iss_script = os.path.join(BASE_DIR, "build_tools", "windows", "installer_script.iss")
     try:
         subprocess.run([iscc_path, iss_script], check=True)
@@ -54,4 +68,6 @@ if os.path.exists(iscc_path):
     except subprocess.CalledProcessError as e:
         print(f"Failed to generate installer: {e}")
 else:
-    print("\nInno Setup (ISCC.exe) not found at default path. Please generate the installer manually using 'installer_script.iss'.")
+    print("\nInno Setup (ISCC.exe) not found.")
+    print("To enable automatic installer generation, place Inno Setup files in 'build_tools/InnoSetup/'")
+    print("or install it globally in 'C:\\Program Files (x86)\\Inno Setup 6'.")
