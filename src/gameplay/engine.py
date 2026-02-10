@@ -515,7 +515,8 @@ class GameEngine:
         
         # Logic: Find the closest note to the hit line
         for tile in self.tiles:
-            if tile.lane == lane_index and not tile.clicked and not tile.missed:
+            # Optimization: Ignore tiles already being held or completed
+            if tile.lane == lane_index and not tile.clicked and not tile.missed and not tile.is_holding and not tile.hold_complete:
                 dist = abs(tile.y - hit_line_y)
                 if dist < tolerance and dist < min_dist:
                     min_dist = dist

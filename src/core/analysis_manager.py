@@ -59,7 +59,7 @@ class AnalysisWorker(QObject):
                                 # This happens if the C++ object is already deleted
                                 pass
                             
-                        detector.analyze(diff, progress_callback=internal_prog)
+                        detector.analyze(diff, progress_callback=internal_prog, stop_check=lambda: not self._is_running)
                         time.sleep(0.05) 
                     else:
                         pass

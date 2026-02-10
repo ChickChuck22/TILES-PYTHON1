@@ -7,6 +7,7 @@ from youtubesearchpython import VideosSearch
 class YouTubeService:
     def __init__(self, cache_dir="assets/cache"):
         self.cache_dir = cache_dir
+        self.stop_download = False
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
 
@@ -88,6 +89,7 @@ class YouTubeService:
 
     def download_audio(self, video_id, callback=None, progress_callback=None):
         """Downloads audio as MP3 to assets/music/youtube using yt-dlp."""
+        self.stop_download = False
         music_dir = os.path.join("assets", "music", "youtube")
         if not os.path.exists(music_dir):
             os.makedirs(music_dir)
@@ -96,6 +98,9 @@ class YouTubeService:
         out_template = os.path.join(music_dir, '%(title)s.%(ext)s')
 
         def progress_hook(d):
+            if self.stop_download:
+                raise Exception("DOWNLOAD_CANCELLED")
+                
             if d['status'] == 'downloading':
                 try:
                     p = d.get('_percent_str', '0%').replace('%','').strip()
@@ -144,6 +149,9 @@ class YouTubeService:
                 if callback: callback(final_file)
             except Exception as e:
                 err_msg = str(e)
+                if "DOWNLOAD_CANCELLED" in err_msg:
+                    print("DEBUG: Download cancelled by user/game start.")
+                    return
                 print(f"Hybrid Download Error: {err_msg}")
                 if callback: callback(f"ERROR: {err_msg}")
 

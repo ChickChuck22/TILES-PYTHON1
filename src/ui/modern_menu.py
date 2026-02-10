@@ -883,7 +883,17 @@ class ModernMenuQt(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_start.setText("ANALYZING...")
         
-        # Stop preview before starting game analysis to avoid collisions
+        # 1. IMMEDIATE INTERRUPTION: Stop background analysis
+        if self.analysis_manager:
+            self.analysis_manager.stop()
+            
+        # 2. IMMEDIATE INTERRUPTION: Cancel any active YouTube download
+        if hasattr(self, 'youtube_service'):
+            self.youtube_service.stop_download = True
+            self.yt_status.setText("Download cancelled (Game Start)")
+            self.yt_progress.setVisible(False)
+
+        # 3. Stop preview before starting game analysis
         if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
             self.preview_thread.terminate()
             self.preview_thread.wait()

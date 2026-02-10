@@ -19,8 +19,9 @@ class BeatDetector:
         file_hash = hashlib.md5(os.path.abspath(self.song_path).encode()).hexdigest()
         return os.path.join(self.cache_dir, f"{file_hash}_{difficulty}.json")
 
-    def analyze(self, difficulty="Normal", progress_callback=None):
+    def analyze(self, difficulty="Normal", progress_callback=None, stop_check=None):
         """Analyzes the song to find beat timestamps with caching."""
+        if stop_check and stop_check(): return None
         cache_path = self._get_cache_path(difficulty)
         
         # Check cache
@@ -48,7 +49,9 @@ class BeatDetector:
             }
             min_interval, onset_delta = diff_settings.get(difficulty, (0.5, 1.0))
 
+            if stop_check and stop_check(): return None
             y, sr = librosa.load(self.song_path)
+            if stop_check and stop_check(): return None
             if progress_callback: progress_callback(30, "Analyzing Rhythm & Vocals...")
             
             # GLOBAL PRECISION SETTING
@@ -65,7 +68,9 @@ class BeatDetector:
             if progress_callback: progress_callback(40, "Separating Instruments (HPSS)...")
             
             # This is the "Heavy" part - Decomposing audio into frequency layers
+            if stop_check and stop_check(): return None
             y_harmonic, y_percussive = librosa.effects.hpss(y)
+            if stop_check and stop_check(): return None
             
             # 2. Analyze PERCUSSIVE Layer (The Beat & Rhythm)
             if progress_callback: progress_callback(50, "Analyzing Drums & Percussion...")
@@ -127,7 +132,9 @@ class BeatDetector:
                 duration = librosa.get_duration(y=y, sr=sr)
                 
                 # Use same high precision hop_length for consistency
+                if stop_check and stop_check(): return None
                 rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop_length)[0]
+                if stop_check and stop_check(): return None
                 times_rms = librosa.times_like(rms, sr=sr, hop_length=hop_length)
                 
                 # Normalize RMS to 0.0 - 1.0
