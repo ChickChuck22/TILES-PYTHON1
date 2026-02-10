@@ -168,5 +168,4 @@ build_tools/windows/Output/TitaniumPiano_Setup.exe
 # Build and Installer Outputs
 build/
 dist/
-bin/*.exe
 build_tools/windows/Output/
