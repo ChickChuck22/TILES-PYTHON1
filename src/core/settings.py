@@ -6,7 +6,23 @@ SETTINGS_FILE = "settings.json"
 class SettingsManager:
     def __init__(self):
         self.settings = {
-            "music_folders": []
+            "music_folders": [],
+            "max_parallel_analysis": 1,
+            "music_volume": 100,
+            "sfx_volume": 100,
+            "scroll_speed": 500,
+            "chord_chance": 0,
+            "hold_chance": 15,
+            "smart_speed": False,
+            "hidden_notes": False,
+            "sudden_notes": False,
+            "flashlight_mode": False,
+            "rainbow_road": False,
+            "confetti_hit": False,
+            "drunk_mode": False,
+            "giant_tiles": False,
+            "selected_skin": "Neon",
+            "custom_background": True
         }
         self.load()
 

@@ -4,6 +4,30 @@ import os
 
 import json
 import hashlib
+import warnings
+import contextlib
+
+# Suppress libmpg123 noisy warnings if possible
+os.environ["MPG123_QUIET"] = "1"
+# Suppress python warnings for audioread/librosa
+warnings.filterwarnings('ignore', category=UserWarning)
+
+class SilenceStderr:
+    """Context manager to silence BOTH Python and C-level stderr."""
+    def __enter__(self):
+        try:
+            self.stderr_fd = sys.stderr.fileno()
+            self.old_stderr = os.dup(self.stderr_fd)
+            self.devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(self.devnull, self.stderr_fd)
+        except Exception:
+            self.stderr_fd = None
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.stderr_fd is not None:
+            os.dup2(self.old_stderr, self.stderr_fd)
+            os.close(self.old_stderr)
+            os.close(self.devnull)
 
 class BeatDetector:
     def __init__(self, song_path, cache_dir="assets/cache"):
@@ -13,6 +37,12 @@ class BeatDetector:
         
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
+            
+        # --- MEMOIZATION CACHE (Instance Level) ---
+        self._cached_y = None
+        self._cached_sr = None
+        self._cached_hpss = None # (y_harmonic, y_percussive)
+        self._cached_energy_data = None # (energy_profile, best_start_time, norm_rms, times_rms)
 
     def _get_cache_path(self, difficulty):
         # Unique key based on FULL PATH and difficulty (prevents collisions)
@@ -50,7 +80,21 @@ class BeatDetector:
             min_interval, onset_delta = diff_settings.get(difficulty, (0.5, 1.0))
 
             if stop_check and stop_check(): return None
-            y, sr = librosa.load(self.song_path)
+            
+            # --- SHARED HEAVY STEP 1: LOAD AUDIO ---
+            if self._cached_y is None:
+                try:
+                    # Capture and silence noisy C-level stderr output during load
+                    with contextlib.redirect_stderr(None): # Python level redirection
+                        with SilenceStderr(): # Custom level redirection
+                            y, sr = librosa.load(self.song_path)
+                    self._cached_y, self._cached_sr = y, sr
+                except Exception as e:
+                    print(f"CRITICAL: Failed to load audio file {self.song_path}: {e}")
+                    raise RuntimeError(f"Audio Load Failed: {e}")
+            else:
+                y, sr = self._cached_y, self._cached_sr
+                
             if stop_check and stop_check(): return None
             if progress_callback: progress_callback(30, "Analyzing Rhythm & Vocals...")
             
@@ -67,9 +111,14 @@ class BeatDetector:
             # 1. Separate the "Soul" (Harmonic) from the "Skeleton" (Percussive)
             if progress_callback: progress_callback(40, "Separating Instruments (HPSS)...")
             
-            # This is the "Heavy" part - Decomposing audio into frequency layers
-            if stop_check and stop_check(): return None
-            y_harmonic, y_percussive = librosa.effects.hpss(y)
+            # --- SHARED HEAVY STEP 2: HPSS ---
+            if self._cached_hpss is None:
+                if stop_check and stop_check(): return None
+                y_harmonic, y_percussive = librosa.effects.hpss(y)
+                self._cached_hpss = (y_harmonic, y_percussive)
+            else:
+                y_harmonic, y_percussive = self._cached_hpss
+                
             if stop_check and stop_check(): return None
             
             # 2. Analyze PERCUSSIVE Layer (The Beat & Rhythm)
@@ -125,48 +174,58 @@ class BeatDetector:
             
             if progress_callback: progress_callback(80, "Optimizing gameplay...")
 
-            # --- ENERGY ANALYSIS (Smart Speed) ---
+            # --- SHARED HEAVY STEP 3: ENERGY ANALYSIS ---
             try:
-                # Calculate RMS energy for the whole track
-                print("Calculating RMS...")
-                duration = librosa.get_duration(y=y, sr=sr)
-                
-                # Use same high precision hop_length for consistency
-                if stop_check and stop_check(): return None
-                rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop_length)[0]
-                if stop_check and stop_check(): return None
-                times_rms = librosa.times_like(rms, sr=sr, hop_length=hop_length)
-                
-                # Normalize RMS to 0.0 - 1.0
-                max_rms = np.max(rms) if np.max(rms) > 0 else 1.0
-                norm_rms = rms / max_rms
-                
-                # Create a lookup function for energy at time t
-                def get_energy_at(t):
-                    idx = int(t * sr / hop_length)
-                    if 0 <= idx < len(norm_rms):
-                        return float(norm_rms[idx])
-                    return 0.0
+                if self._cached_energy_data is None:
+                    # Calculate RMS energy for the whole track
+                    print("Calculating RMS...")
+                    duration = librosa.get_duration(y=y, sr=sr)
                     
-                print(f"Sampling Energy Profile for duration {duration:.2f}s...")
-                # Sample energy profile for JSON (resolution: 1 point every 0.1s for smoother curve?)
-                energy_profile = []
-                for t in np.arange(0, duration, 0.2):
-                    energy_profile.append([float(t), get_energy_at(t)])
+                    # Use same high precision hop_length for consistency
+                    if stop_check and stop_check(): return None
+                    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop_length)[0]
+                    if stop_check and stop_check(): return None
+                    times_rms = librosa.times_like(rms, sr=sr, hop_length=hop_length)
+                    
+                    # Normalize RMS to 0.0 - 1.0
+                    max_rms = np.max(rms) if np.max(rms) > 0 else 1.0
+                    norm_rms = rms / max_rms
+                    
+                    # Create a lookup function for energy at time t
+                    def get_energy_at(t):
+                        idx = int(t * sr / hop_length)
+                        if 0 <= idx < len(norm_rms):
+                            return float(norm_rms[idx])
+                        return 0.0
+                        
+                    print(f"Sampling Energy Profile for duration {duration:.2f}s...")
+                    # Sample energy profile for JSON (resolution: 1 point every 0.1s for smoother curve?)
+                    energy_profile = []
+                    for t in np.arange(0, duration, 0.2):
+                        energy_profile.append([float(t), get_energy_at(t)])
 
-                # CLIMAX DETECTION (For Preview) using the calculated RMS
-                window_size_frames = int(5.0 * sr / hop_length)
-                max_energy_sum = 0
-                best_start_time = 0
-                
-                if len(norm_rms) > window_size_frames:
-                    for i in range(0, len(norm_rms) - window_size_frames, window_size_frames // 5):
-                        chunk_energy = np.sum(norm_rms[i:i+window_size_frames])
-                        if chunk_energy > max_energy_sum:
-                            max_energy_sum = chunk_energy
-                            best_start_time = times_rms[i]
-                
-                if best_start_time > duration - 10: best_start_time = 0
+                    # CLIMAX DETECTION (For Preview) using the calculated RMS
+                    window_size_frames = int(5.0 * sr / hop_length)
+                    max_energy_sum = 0
+                    best_start_time = 0
+                    
+                    if len(norm_rms) > window_size_frames:
+                        for i in range(0, len(norm_rms) - window_size_frames, window_size_frames // 5):
+                            chunk_energy = np.sum(norm_rms[i:i+window_size_frames])
+                            if chunk_energy > max_energy_sum:
+                                max_energy_sum = chunk_energy
+                                best_start_time = times_rms[i]
+                    
+                    if best_start_time > duration - 10: best_start_time = 0
+                    self._cached_energy_data = (energy_profile, best_start_time, norm_rms, times_rms)
+                else:
+                    energy_profile, best_start_time, norm_rms, times_rms = self._cached_energy_data
+                    duration = librosa.get_duration(y=y, sr=sr)
+                    def get_energy_at(t):
+                        idx = int(t * sr / hop_length)
+                        if 0 <= idx < len(norm_rms):
+                            return float(norm_rms[idx])
+                        return 0.0
                 
                 # --- DENSITY FILTERING (Restored for Playability) ---
                 # We filter based on difficulty limits to prevent "spam".

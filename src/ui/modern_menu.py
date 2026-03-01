@@ -89,6 +89,12 @@ class ModernMenuQt(QMainWindow):
         if self.selected_song:
             self.select_song(self.selected_song)
 
+        # 4. Apply Initial Settings
+        mvol = self.settings_manager.settings.get("music_volume", 100)
+        svol = self.settings_manager.settings.get("sfx_volume", 100)
+        self.audio_manager.set_music_volume(mvol / 100.0)
+        self.audio_manager.set_sfx_volume(svol / 100.0)
+
     def closeEvent(self, event):
         """Cleanup threads on exit."""
         if self.analysis_manager:
@@ -317,13 +323,24 @@ class ModernMenuQt(QMainWindow):
 
     def init_mods_page(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(60, 60, 60, 60)
-        layout.setSpacing(40)
+        main_layout = QVBoxLayout(page)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+
+        # Scroll Area for Modifiers
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
         
-        title = QLabel("Gameplay Modifiers")
-        title.setStyleSheet("font-size: 28px; font-weight: bold;")
-        layout.addWidget(title)
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(20)
+        layout.setAlignment(Qt.AlignTop)
+
+        lbl = QLabel("GAMEPLAY MODIFIERS")
+        lbl.setStyleSheet(f"font-size: 32px; font-weight: 900; color: {styles.COLOR_TEXT_PRIMARY}; margin-bottom: 20px;")
+        layout.addWidget(lbl)
         
         def create_slider(label_text, min_v, max_v, default_v, callback):
             container = QWidget()
@@ -352,17 +369,114 @@ class ModernMenuQt(QMainWindow):
             layout.addWidget(container)
             return slider, lbl
             
-        self.speed_slider, self.speed_label = create_slider("Scroll Speed", 300, 2500, 500, self.on_speed_changed)
-        self.chord_slider, self.chord_label = create_slider("Chord %", 0, 100, 0, self.on_chord_changed)
-        self.hold_slider, self.hold_label = create_slider("Hold %", 0, 100, 15, self.on_hold_changed)
+        # Load saved mods
+        s_speed = self.settings_manager.settings.get("scroll_speed", 500)
+        s_chord = self.settings_manager.settings.get("chord_chance", 0)
+        s_hold = self.settings_manager.settings.get("hold_chance", 15)
+        s_smart = self.settings_manager.settings.get("smart_speed", False)
+
+        self.speed_slider, self.speed_label = create_slider("Scroll Speed", 300, 2500, s_speed, self.on_speed_changed)
+        self.chord_slider, self.chord_label = create_slider("Chord %", 0, 100, s_chord, self.on_chord_changed)
+        self.hold_slider, self.hold_label = create_slider("Hold %", 0, 100, s_hold, self.on_hold_changed)
         
         # Checkbox
         self.chk_smart_speed = QCheckBox("Enable Smart Speed (Dynamic)")
+        self.chk_smart_speed.setChecked(s_smart)
         self.chk_smart_speed.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
-        self.chk_smart_speed.stateChanged.connect(self.update_stars)
+        self.chk_smart_speed.stateChanged.connect(self.on_smart_speed_changed)
         layout.addWidget(self.chk_smart_speed)
         
+        # New: Hidden Notes Modifier
+        s_hidden = self.settings_manager.settings.get("hidden_notes", False)
+        self.chk_hidden_notes = QCheckBox("Hidden Notes (Fade-out)")
+        self.chk_hidden_notes.setChecked(s_hidden)
+        self.chk_hidden_notes.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_hidden_notes.stateChanged.connect(self.on_hidden_notes_changed)
+        layout.addWidget(self.chk_hidden_notes)
+        
+        # New: Sudden Notes Modifier
+        s_sudden = self.settings_manager.settings.get("sudden_notes", False)
+        self.chk_sudden_notes = QCheckBox("Sudden Notes (Fade-in)")
+        self.chk_sudden_notes.setChecked(s_sudden)
+        self.chk_sudden_notes.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_sudden_notes.stateChanged.connect(self.on_sudden_notes_changed)
+        layout.addWidget(self.chk_sudden_notes)
+
+        # New: Flashlight Modifier
+        s_flashlight = self.settings_manager.settings.get("flashlight_mode", False)
+        self.chk_flashlight = QCheckBox("Flashlight Mode (Limited light)")
+        self.chk_flashlight.setChecked(s_flashlight)
+        self.chk_flashlight.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_flashlight.stateChanged.connect(self.on_flashlight_changed)
+        layout.addWidget(self.chk_flashlight)
+
+        # Funny Modifiers
+        layout.addSpacing(10)
+        lbl_funny = QLabel("FUNNY MODIFIERS")
+        lbl_funny.setStyleSheet("font-weight: bold; color: #888; margin-top: 10px;")
+        layout.addWidget(lbl_funny)
+
+        # Rainbow Road
+        s_rainbow = self.settings_manager.settings.get("rainbow_road", False)
+        self.chk_rainbow = QCheckBox("Rainbow Road (Color Cycle)")
+        self.chk_rainbow.setChecked(s_rainbow)
+        self.chk_rainbow.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_rainbow.stateChanged.connect(self.on_rainbow_changed)
+        layout.addWidget(self.chk_rainbow)
+
+        # Confetti Hit
+        s_confetti = self.settings_manager.settings.get("confetti_hit", False)
+        self.chk_confetti = QCheckBox("Confetti Hit (Visual Pop)")
+        self.chk_confetti.setChecked(s_confetti)
+        self.chk_confetti.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_confetti.stateChanged.connect(self.on_confetti_changed)
+        layout.addWidget(self.chk_confetti)
+
+        # Drunk Mode
+        s_drunk = self.settings_manager.settings.get("drunk_mode", False)
+        self.chk_drunk = QCheckBox("Drunk Mode (Screen Tilt)")
+        self.chk_drunk.setChecked(s_drunk)
+        self.chk_drunk.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_drunk.stateChanged.connect(self.on_drunk_changed)
+        layout.addWidget(self.chk_drunk)
+
+        # Giant Tiles
+        s_giant = self.settings_manager.settings.get("giant_tiles", False)
+        self.chk_giant = QCheckBox("Giant Tiles (Big Visuals)")
+        self.chk_giant.setChecked(s_giant)
+        self.chk_giant.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_giant.stateChanged.connect(self.on_giant_changed)
+        layout.addWidget(self.chk_giant)
+
+        # Skin & Customization
+        layout.addSpacing(30)
+        lbl_skin = QLabel("VISUAL THEME")
+        lbl_skin.setStyleSheet("font-size: 14px; font-weight: bold; color: #666; letter-spacing: 2px;")
+        layout.addWidget(lbl_skin)
+
+        self.skin_combo = QComboBox()
+        self.skin_combo.addItems(["Neon", "Piano", "Minimal", "Toxic"])
+        self.skin_combo.setCurrentText(self.settings_manager.settings.get("selected_skin", "Neon"))
+        self.skin_combo.setStyleSheet("""
+            QComboBox { 
+                background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: white; min-width: 200px;
+            }
+            QComboBox::drop-down { border: none; }
+        """)
+        self.skin_combo.currentTextChanged.connect(self.on_skin_changed)
+        layout.addWidget(self.skin_combo)
+
+        s_bg = self.settings_manager.settings.get("custom_background", True)
+        self.chk_custom_bg = QCheckBox("Enable Custom Backgrounds (bg.jpg)")
+        self.chk_custom_bg.setChecked(s_bg)
+        self.chk_custom_bg.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: #888; }} QCheckBox::indicator {{ width: 18px; height: 18px; }}")
+        self.chk_custom_bg.stateChanged.connect(self.on_custom_bg_changed)
+        layout.addWidget(self.chk_custom_bg)
+        
         layout.addStretch()
+        
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
         self.stack.addWidget(page)
 
     def init_system_page(self):
@@ -376,16 +490,17 @@ class ModernMenuQt(QMainWindow):
         layout.addWidget(title)
         
         # Helper for System Sliders
-        def create_sys_slider(label_text, default_v, callback):
+        def create_sys_slider(label_text, default_v, callback, min_v=0, max_v=100, is_percent=True):
             container = QWidget()
             l = QVBoxLayout(container)
             l.setSpacing(10)
             
-            lbl = QLabel(f"{label_text}: {default_v}%")
+            suffix = "%" if is_percent else ""
+            lbl = QLabel(f"{label_text}: {default_v}{suffix}")
             lbl.setStyleSheet("font-size: 16px; color: #CCC;")
             
             slider = QSlider(Qt.Horizontal)
-            slider.setRange(0, 100)
+            slider.setRange(min_v, max_v)
             slider.setValue(default_v)
             slider.setStyleSheet(f"""
                 QSlider::groove:horizontal {{ height: 6px; background: #333; border-radius: 3px; }}
@@ -393,7 +508,7 @@ class ModernMenuQt(QMainWindow):
             """)
             
             def update_lbl(val):
-                lbl.setText(f"{label_text}: {val}%")
+                lbl.setText(f"{label_text}: {val}{suffix}")
                 callback(val)
                 
             slider.valueChanged.connect(update_lbl)
@@ -404,10 +519,16 @@ class ModernMenuQt(QMainWindow):
             return slider
             
         # Music Volume
-        self.mvol_slider = create_sys_slider("Music Volume", 100, self.on_mvol_changed)
+        mvol = self.settings_manager.settings.get("music_volume", 100)
+        self.mvol_slider = create_sys_slider("Music Volume", mvol, self.on_mvol_changed)
         
         # SFX Volume
-        self.svol_slider = create_sys_slider("SFX Volume", 100, self.on_svol_changed)
+        svol = self.settings_manager.settings.get("sfx_volume", 100)
+        self.svol_slider = create_sys_slider("SFX Volume", svol, self.on_svol_changed)
+        
+        # Parallel Analysis Tasks
+        max_para = self.settings_manager.settings.get("max_parallel_analysis", 1)
+        self.para_slider = create_sys_slider("Parallel Analysis Tasks", max_para, self.on_para_changed, min_v=1, max_v=7, is_percent=False)
         
         # Library Manager
         btn_lib = QPushButton("📂  Manage Music Library")
@@ -910,7 +1031,16 @@ class ModernMenuQt(QMainWindow):
             "chord_chance": self.chord_slider.value() / 100.0,
             "hold_chance": self.hold_slider.value() / 100.0,
             "smart_speed": self.chk_smart_speed.isChecked(),
-            "energy_profile": result.get("energy_profile", []) if isinstance(result, dict) else []
+            "hidden_notes": self.chk_hidden_notes.isChecked(),
+            "sudden_notes": self.chk_sudden_notes.isChecked(),
+            "flashlight_mode": self.chk_flashlight.isChecked(),
+            "rainbow_road": self.chk_rainbow.isChecked(),
+            "confetti_hit": self.chk_confetti.isChecked(),
+            "drunk_mode": self.chk_drunk.isChecked(),
+            "giant_tiles": self.chk_giant.isChecked(),
+            "energy_profile": result.get("energy_profile", []) if isinstance(result, dict) else [],
+            "selected_skin": self.skin_combo.currentText(),
+            "custom_background": self.chk_custom_bg.isChecked()
         }
         self.song_ready.emit(self.selected_song, self.diff_combo.currentText(), beats, custom)
         
@@ -958,15 +1088,13 @@ class ModernMenuQt(QMainWindow):
         # Start Background Analysis
         if self.analysis_manager:
             self.analysis_manager.stop()
-            self.analysis_manager.wait()
             
         song_paths = [s["path"] for s in self.songs]
-        self.analysis_manager = AnalysisManager(song_paths)
-        self.analysis_manager.worker.progress.connect(self.on_analysis_progress)
-        self.analysis_manager.worker.finished.connect(self.on_analysis_step_finished)
-        self.analysis_manager.worker.diff_finished.connect(self.on_diff_finished)
-        # self.analysis_manager.worker.all_finished.connect(self.on_all_analysis_finished)
-        self.analysis_manager.start()
+        max_para = self.settings_manager.settings.get("max_parallel_analysis", 1)
+        self.analysis_manager = AnalysisManager(song_paths, max_threads=max_para)
+        self.analysis_manager.worker_progress.connect(self.on_analysis_progress)
+        self.analysis_manager.worker_finished.connect(self.on_analysis_step_finished)
+        self.analysis_manager.worker_diff_finished.connect(self.on_diff_finished)
         
     def on_analysis_progress(self, song_path, val):
         if song_path in self.song_cards:
@@ -1078,21 +1206,80 @@ class ModernMenuQt(QMainWindow):
 
     # Sliders logic
     def on_speed_changed(self, v): 
-        self.update_stars()
-    def on_chord_changed(self, v):
-        self.chord_label.setText(f"Chord %: {v}")
-        self.update_stars()
-    def on_hold_changed(self, v):
-        self.hold_label.setText(f"Hold %: {v}")
+        self.settings_manager.settings["scroll_speed"] = v
+        self.settings_manager.save()
         self.update_stars()
 
+    def on_chord_changed(self, v):
+        self.chord_label.setText(f"Chord %: {v}")
+        self.settings_manager.settings["chord_chance"] = v
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_hold_changed(self, v):
+        self.hold_label.setText(f"Hold %: {v}")
+        self.settings_manager.settings["hold_chance"] = v
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_smart_speed_changed(self, state):
+        self.settings_manager.settings["smart_speed"] = (state == Qt.Checked)
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_hidden_notes_changed(self, state):
+        self.settings_manager.settings["hidden_notes"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_sudden_notes_changed(self, state):
+        self.settings_manager.settings["sudden_notes"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_flashlight_changed(self, state):
+        self.settings_manager.settings["flashlight_mode"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_rainbow_changed(self, state):
+        self.settings_manager.settings["rainbow_road"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_skin_changed(self, skin_name):
+        self.settings_manager.settings["selected_skin"] = skin_name
+        self.settings_manager.save()
+
+    def on_custom_bg_changed(self, state):
+        self.settings_manager.settings["custom_background"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_confetti_changed(self, state):
+        self.settings_manager.settings["confetti_hit"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_drunk_changed(self, state):
+        self.settings_manager.settings["drunk_mode"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_giant_changed(self, state):
+        self.settings_manager.settings["giant_tiles"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
     def on_mvol_changed(self, v):
+        self.settings_manager.settings["music_volume"] = v
+        self.settings_manager.save()
         if hasattr(self, 'audio_manager'):
             self.audio_manager.set_music_volume(v / 100.0)
 
     def on_svol_changed(self, v):
+        self.settings_manager.settings["sfx_volume"] = v
+        self.settings_manager.save()
         if hasattr(self, 'audio_manager'):
             self.audio_manager.set_sfx_volume(v / 100.0)
+
+    def on_para_changed(self, v):
+        self.settings_manager.settings["max_parallel_analysis"] = v
+        self.settings_manager.save()
+        if self.analysis_manager:
+            self.analysis_manager.set_max_threads(v)
 
     
     def sync_sliders_to_preset(self):

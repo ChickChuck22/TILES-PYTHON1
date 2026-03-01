@@ -1,114 +1,108 @@
 import os
-import time
-from PyQt5.QtCore import QThread, pyqtSignal, QObject
+from PyQt5.QtCore import QThread, pyqtSignal, QObject, QRunnable, QThreadPool
 from src.core.beat_detector import BeatDetector
 
-class AnalysisWorker(QObject):
-    """Worker that runs in a separate thread to analyze songs."""
-    progress = pyqtSignal(str, float) # Song Name, Percent (0-100)
-    finished = pyqtSignal(str)        # Song Name (All diffs done)
-    diff_finished = pyqtSignal(str, str) # Song Name, Difficulty Name
-    all_finished = pyqtSignal()
+class AnalysisWorker(QRunnable):
+    """Worker that runs as a task in a thread pool to analyze a single song."""
+    class Signals(QObject):
+        progress = pyqtSignal(str, float)    # Song Name, Percent (0-100)
+        finished = pyqtSignal(str)           # Song Name (All diffs done)
+        diff_finished = pyqtSignal(str, str) # Song Name, Difficulty Name
     
-    def __init__(self, songs, difficulties=["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"]):
+    def __init__(self, song_path, difficulties):
         super().__init__()
-        self.songs = list(songs) # Current queue
-        self.difficulties = ["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"]
+        self.song_path = song_path
+        self.difficulties = difficulties
+        self.signals = self.Signals()
         self._is_running = True
-        self._index = 0
 
     def run(self):
-        print("DEBUG: AnalysisWorker started.")
+        song_name = os.path.basename(self.song_path)
         total_diffs = len(self.difficulties)
         
-        while self._is_running:
-            if self._index >= len(self.songs):
-                time.sleep(1.0) # Wait for more
-                continue
+        try:
+            # Initialize detector (lightweight)
+            detector = BeatDetector(self.song_path)
             
-            song_path = self.songs[self._index]
-            self._index += 1
-            
-            song_name = os.path.basename(song_path)
-            
-            try:
-                # Initialize detector (lightweight)
-                detector = BeatDetector(song_path)
+            for i, diff in enumerate(self.difficulties):
+                if not self._is_running: break
                 
-                for i, diff in enumerate(self.difficulties):
-                    if not self._is_running: break
+                # Check if cache exists
+                cache_path = detector._get_cache_path(diff)
+                
+                # Base progress for this difficulty
+                base_prog = (i / total_diffs) * 100
+                
+                if not os.path.exists(cache_path):
+                    print(f"DEBUG Parallel: Generating cache for {song_name} [{diff}]")
                     
-                    # Check if cache exists
-                    cache_path = detector._get_cache_path(diff)
-                    
-                    # Base progress for this difficulty
-                    base_prog = (i / total_diffs) * 100
-                    
-                    if not os.path.exists(cache_path):
-                        print(f"DEBUG: Generating cache for {song_name} [{diff}]")
+                    def internal_prog(val, msg):
+                        if not self._is_running: return
+                        try:
+                            overall = base_prog + (val / total_diffs)
+                            self.signals.progress.emit(self.song_path, overall)
+                        except: pass
                         
-                        # INTERNAL Callback to map 0-100 of step to overall song progress
-                        def internal_prog(val, msg):
-                            # SAFETY: Check if we are still running/not deleted
-                            if not self._is_running: return
-                            try:
-                                # overall = base_prog + (val / total_diffs)
-                                overall = base_prog + (val / total_diffs)
-                                self.progress.emit(song_path, overall)
-                            except RuntimeError:
-                                # This happens if the C++ object is already deleted
-                                pass
-                            
-                        detector.analyze(diff, progress_callback=internal_prog, stop_check=lambda: not self._is_running)
-                        time.sleep(0.05) 
-                    else:
-                        pass
-                    
-                    # Notify this specific diff is done/ready
-                    try: self.diff_finished.emit(song_path, diff)
-                    except RuntimeError: pass
-                    
-                try: self.finished.emit(song_path)
-                except RuntimeError: pass
-            except Exception as e:
-                print(f"Error checking {song_name}: {e}")
-            
-        print("DEBUG: AnalysisWorker finished all tasks.")
-        try: self.all_finished.emit()
-        except RuntimeError: pass
+                    detector.analyze(diff, progress_callback=internal_prog, stop_check=lambda: not self._is_running)
+                
+                # Notify this specific diff is done/ready
+                try: self.signals.diff_finished.emit(self.song_path, diff)
+                except: pass
+                
+            try: self.signals.finished.emit(self.song_path)
+            except: pass
+        except Exception as e:
+            print(f"Parallel Worker Error ({song_name}): {e}")
 
     def stop(self):
         self._is_running = False
 
 class AnalysisManager(QObject):
-    """Wrapper to manage the thread and worker."""
-    def __init__(self, songs):
+    """Manages a pool of analysis workers."""
+    # Signals to bubble up to UI
+    worker_progress = pyqtSignal(str, float)
+    worker_finished = pyqtSignal(str)
+    worker_diff_finished = pyqtSignal(str, str)
+    all_finished = pyqtSignal()
+
+    def __init__(self, songs, max_threads=1):
         super().__init__()
-        self.thread = QThread()
-        self.worker = AnalysisWorker(songs)
-        self.worker.moveToThread(self.thread)
+        self.max_threads = max_threads
+        self.pool = QThreadPool.globalInstance()
+        self.pool.setMaxThreadCount(max_threads)
+        self.active_workers = {} # song_path -> worker
+        self.songs_in_queue = set()
         
-        self.thread.started.connect(self.worker.run)
+        for s in songs:
+            self.add_song(s)
+
+    def set_max_threads(self, count):
+        self.max_threads = count
+        self.pool.setMaxThreadCount(count)
+
+    def add_song(self, song_path):
+        if song_path in self.songs_in_queue: return
+        self.songs_in_queue.add(song_path)
         
-    def start(self):
-        self.thread.start()
+        worker = AnalysisWorker(song_path, ["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"])
+        # Map worker signals to manager signals (UI connects to manager)
+        worker.signals.progress.connect(self.worker_progress.emit)
+        worker.signals.finished.connect(self.worker_finished.emit)
+        worker.signals.diff_finished.connect(self.worker_diff_finished.emit)
         
+        self.active_workers[song_path] = worker
+        self.pool.start(worker)
+
     def stop(self):
-        self.worker.stop()
-        self.thread.quit()
-        self.thread.wait()
-
-    def wait(self):
-        self.thread.wait()
-
-    def is_running(self):
-        return self.thread.isRunning()
+        for worker in self.active_workers.values():
+            worker.stop()
+        self.pool.clear()
+        self.active_workers.clear()
+        self.songs_in_queue.clear()
 
     def add_songs(self, new_songs):
-        """Dynamically add songs to the analysis queue."""
         for s in new_songs:
-            if s not in self.worker.songs:
-                self.worker.songs.append(s)
+            self.add_song(s)
 
 class AnalysisThread(QThread):
     """Thread for a single song analysis (used for previews)."""

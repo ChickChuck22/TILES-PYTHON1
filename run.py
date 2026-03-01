@@ -1,5 +1,6 @@
 import sys
 import os
+os.environ["MPG123_QUIET"] = "1" # Suppress noisy ID3/MP3 warnings
 import traceback
 import pygame
 from dotenv import load_dotenv
@@ -9,8 +10,11 @@ from src.core.constants import *
 from src.core.state_manager import StateManager, GameState
 from src.core.audio_manager import AudioManager
 from src.services.discord_rpc import DiscordRPC
-from src.gameplay.engine import GameEngine
+from src.gameplay.modes.classic.engine import GameEngine
+from src.gameplay.modes.cyber_run.engine import CyberRunEngine
+from src.gameplay.modes.vibe_tunnel.engine import VibeTunnelEngine
 from src.core.settings import SettingsManager
+from src.ui.launcher import run_launcher
 
 load_dotenv() # Load environment variables
 
@@ -38,56 +42,47 @@ class PianoTilesApp:
         self.running = True
         self.is_resuming = False
         self.return_to_menu = False
+        self.selected_mode = None
 
     def start_launcher(self):
         try:
-            # Ensure any old display is closed before showing Qt menu
-            pygame.display.quit()
-            
-            # Load songs from settings + default
-            folders = self.settings_manager.get_music_folders()
-            folders.append("assets/music")
-            folders.append(os.path.join("assets", "music", "youtube"))
-            folders.append(os.path.join("assets", "music", "spotify"))
-            print(f"Scanning folders: {folders}")
-            
-            songs = self.audio_manager.scan_library(folders)
-            print(f"Starting menu with {len(songs)} songs...")
-            
-            last_results = None
-            
             while True:
-                # Ensure mixer is alive for menu previews
-                if not pygame.mixer.get_init():
-                    try: pygame.mixer.init()
-                    except: pass
+                # 1. Choose Mode if not set
+                pygame.display.quit()
+                self.selected_mode = run_launcher()
+                if not self.selected_mode:
+                    break # Exit App
+
+                # Load songs
+                folders = self.settings_manager.get_music_folders()
+                folders.append("assets/music")
+                folders.append(os.path.join("assets", "music", "youtube"))
+                folders.append(os.path.join("assets", "music", "spotify"))
+                songs = self.audio_manager.scan_library(folders)
                 
-                # Start Qt Menu directly
-                print(f"DEBUG: Calling run_menu with results={last_results}")
-                from src.ui.modern_menu import run_menu
-                selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager, self.discord_rpc, results=last_results)
+                last_results = None
                 
-                # Reset results after showing them
-                last_results = None 
-                
-                if selected_song:
-                    print(f"Selected: {selected_song} | Difficulty: {difficulty} | Custom: {custom_settings}")
-                    self.init_game(selected_song, difficulty, beats, custom_settings)
-                    last_results = self.run_game_loop()
-                    print(f"DEBUG: Game Loop Ended. Results: {last_results}")
+                # 2. Song Menu Loop
+                while True:
+                    if not pygame.mixer.get_init():
+                        try: pygame.mixer.init()
+                        except: pass
                     
-                    # Force window close so Qt can take over
-                    pygame.display.quit()
-                    # Do NOT call pygame.quit() here as it kills the mixer and global state
-                else:
-                    print("Launcher exited without selection.")
-                    self.cleanup()
-                    break
+                    from src.ui.modern_menu import run_menu
+                    selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager, self.discord_rpc, results=last_results)
+                    last_results = None 
                     
-        except Exception:
-            traceback.print_exc()
-            input("Press Enter to close...")
+                    if selected_song:
+                        self.init_game(selected_song, difficulty, beats, custom_settings)
+                        last_results = self.run_game_loop()
+                        pygame.display.quit()
+                    else:
+                        # Exit back to Launcher
+                        break
+            
+            self.cleanup()
             sys.exit()
+
         except Exception as e:
             msg = traceback.format_exc()
             with open("crash_log.txt", "w") as f:
@@ -111,15 +106,19 @@ class PianoTilesApp:
         self.selected_song_title = os.path.splitext(os.path.basename(song_name))[0]
         self.difficulty = difficulty
 
-        # Get Monitor Height for vertical maximization
-        info = pygame.display.Info()
-        max_h = info.current_h - 50
+        # Dynamic Screen Size
+        if self.selected_mode == "vibe_tunnel":
+            target_w, target_h = 1280, 720
+        else:
+            info = pygame.display.Info()
+            target_w = 400
+            target_h = info.current_h - 50
         
-        # We need to update constants before creating screen?
         import src.core.constants as constants
-        constants.SCREEN_HEIGHT = max_h
-        global SCREEN_HEIGHT
-        SCREEN_HEIGHT = max_h
+        constants.SCREEN_WIDTH = target_w
+        constants.SCREEN_HEIGHT = target_h
+        global SCREEN_WIDTH, SCREEN_HEIGHT
+        SCREEN_WIDTH, SCREEN_HEIGHT = target_w, target_h
         
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         
@@ -141,10 +140,21 @@ class PianoTilesApp:
             song_path = os.path.join("assets/music", song_name)
         if self.audio_manager.load_song(song_path):
             duration = self.audio_manager.song_duration
-            self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+            
+            # Select Engine based on Mode
+            if self.selected_mode == "classic":
+                self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+            elif self.selected_mode == "cyber_run":
+                self.game_engine = CyberRunEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+            elif self.selected_mode == "vibe_tunnel":
+                self.game_engine = VibeTunnelEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+            else:
+                # Default to classic if mode is not recognized or not set
+                self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+            
             self.game_engine.set_beats(beats)
             self.state_manager.change_state(GameState.COUNTDOWN)
-            print("Game state is now COUNTDOWN")
+            print(f"Game engine created for mode: {self.selected_mode}")
         else:
             print("Failed to load song audio.")
             self.start_launcher()
@@ -204,6 +214,9 @@ class PianoTilesApp:
                         lane_idx = LANE_KEYS.index(event.key)
                         # Use engine time for consistency during delay
                         self.game_engine.handle_keydown(lane_idx, self.audio_manager.get_pos())
+                    elif event.key == pygame.K_SPACE:
+                        # Dedicated key for Dash in Cyber Run or other actions
+                        self.game_engine.handle_keydown("SPACE", self.audio_manager.get_pos())
                     elif event.key == pygame.K_ESCAPE:
                         return False
                 
@@ -258,7 +271,9 @@ class PianoTilesApp:
                             "goods": self.game_engine.goods,
                             "misses": self.game_engine.misses,
                             "song": self.selected_song_title,
-                            "rank": "F" # Calculate rank here or in menu
+                            "rank": "F",
+                            "hit_log": list(self.game_engine.hit_log), # Precision data
+                            "duration": getattr(self.game_engine, 'song_duration', 0)
                         }
                         
                         # Calculating Rank
