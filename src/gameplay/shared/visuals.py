@@ -48,6 +48,10 @@ class FloatingText:
         self.scale = 1.0
         self.rotation = random.uniform(-15, 15)
         
+        # Ensure text is not empty to avoid Pygame crash
+        if not text or text.strip() == "":
+            text = " "
+            
         font = self.get_font()
         self.base_surf = font.render(text, True, color)
 

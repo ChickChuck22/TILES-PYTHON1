@@ -57,10 +57,29 @@ class BeatDetector:
         # Check cache
         if os.path.exists(cache_path):
             if progress_callback: progress_callback(50, "Loading from cache...")
-            with open(cache_path, 'r') as f:
-                self.beat_times = json.load(f)
-            if progress_callback: progress_callback(100, "Ready!")
-            return self.beat_times
+            try:
+                with open(cache_path, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.beat_times = [float(t) for t in data.get("beats", [])]
+                        self.energy_profile = data.get("energy_profile", [])
+                        self.preview_start = data.get("preview_start", 0.0)
+                        # Store in instance cache for current run if needed
+                        self._cached_energy_data = (self.energy_profile, self.preview_start, None, None)
+                    else:
+                        # Legacy cache support
+                        self.beat_times = [float(t) for t in data]
+                
+                if progress_callback: progress_callback(100, "Ready!")
+                
+                # IMPORTANT: Always return ONLY the beats for consistency with downstream expectations
+                # unless specifically asked for the full metadata dict.
+                # However, many parts of the app expect a list.
+                # To maintain compatibility with both, we'll return the list by default
+                # and subclasses or specific calls can access self.beat_times.
+                return self.beat_times
+            except Exception as e:
+                print(f"Error loading cache: {e}. Re-analyzing...")
 
         try:
             if progress_callback: progress_callback(10, "Loading audio file...")
@@ -282,11 +301,11 @@ class BeatDetector:
                 print(f"Cache save failed: {e}")
             
             if progress_callback: progress_callback(100, "Ready!")
-            return result
+            return self.beat_times
             
         except Exception as e:
             if not isinstance(e, RuntimeError):
                 print(f"Error during beat analysis: {e}")
                 import traceback
                 traceback.print_exc()
-            return {"beats": [i * 0.5 for i in range(1, 100)], "preview_start": 0.0}
+            return [i * 0.5 for i in range(1, 100)]

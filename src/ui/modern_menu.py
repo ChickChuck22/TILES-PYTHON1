@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QGraphicsDropShadowEffect, QButtonGroup, QDialog, QSizePolicy, QTabWidget,
     QListWidget, QListWidgetItem
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QSize, pyqtSlot, QThread, QUrl, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, pyqtSlot, QThread, QUrl, QTimer, QObject
 from PyQt5.QtGui import QIcon, QFont, QPixmap, QColor, QFontMetrics
 
 # Local imports
@@ -22,9 +22,201 @@ from src.services.spotify_service import SpotifyService
 from src.services.youtube_service import YouTubeService
 from src.core.analysis_manager import AnalysisManager, AnalysisThread
 
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PyQt5 import sip
+
+class ImageManager(QObject):
+    """Native Qt asynchronous image manager."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nam = QNetworkAccessManager()
+        self.cache = {} # url -> pixmap
+
+    def load(self, url, target_widget):
+        if not url or not url.startswith("http"): return
+        
+        # Check if underlying C++ object was deleted? (Common across QApp restarts)
+        if sip.isdeleted(self.nam):
+            print("DEBUG: QNetworkAccessManager was deleted, recreating...")
+            self.nam = QNetworkAccessManager()
+            
+        if url in self.cache:
+            target_widget.set_image(self.cache[url])
+            return
+
+        req = QNetworkRequest(QUrl(url))
+        reply = self.nam.get(req)
+        reply.finished.connect(lambda: self._on_finish(url, reply, target_widget))
+
+    def _on_finish(self, url, reply, target_widget):
+        try:
+            data = reply.readAll()
+            pixmap = QPixmap()
+            if pixmap.loadFromData(data):
+                self.cache[url] = pixmap
+                
+                # Disk Cache for Gameplay (Pygame needs a file)
+                if url.startswith("http"):
+                    try:
+                        import hashlib
+                        cache_dir = os.path.join("assets", "cache", "images")
+                        os.makedirs(cache_dir, exist_ok=True)
+                        h = hashlib.md5(url.encode()).hexdigest()
+                        path = os.path.join(cache_dir, f"{h}.png")
+                        if not os.path.exists(path):
+                            pixmap.save(path, "PNG")
+                    except: pass
+
+                try: target_widget.set_image(pixmap)
+                except: pass
+        except Exception as e:
+            print(f"Image Load Async Error: {e}")
+        finally:
+            reply.deleteLater()
+
+_IMAGE_MANAGER = None
+def get_image_manager():
+    global _IMAGE_MANAGER
+    if _IMAGE_MANAGER is None:
+        _IMAGE_MANAGER = ImageManager()
+    return _IMAGE_MANAGER
+
+class SpotifyTrackCard(QFrame):
+    clicked = pyqtSignal(dict)
+    download_clicked = pyqtSignal(dict, QPushButton)
+
+    def __init__(self, track, is_downloaded=False):
+        super().__init__()
+        self.track = track
+        self.is_downloaded = is_downloaded
+        self.setObjectName("SpotifyCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(80)
+        self.setStyleSheet("""
+            QFrame#SpotifyCard {
+                background-color: #1E1E1E;
+                border-radius: 12px;
+                border: 1px solid #333;
+            }
+            QFrame#SpotifyCard:hover {
+                background-color: #252525;
+                border: 1px solid #1DB954;
+            }
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 15, 10)
+        layout.setSpacing(15)
+        
+        # 1. Image
+        self.img_label = QLabel()
+        self.img_label.setFixedSize(60, 60)
+        self.img_label.setStyleSheet("background-color: #121212; border-radius: 6px;")
+        self.img_label.setScaledContents(True)
+        # Placeholder
+        self.img_label.setText("🎵")
+        self.img_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.img_label)
+        
+        # 2. Info
+        info_l = QVBoxLayout()
+        info_l.setSpacing(2)
+        
+        self.title_lbl = QLabel(track['name'])
+        self.title_lbl.setStyleSheet("color: white; font-size: 15px; font-weight: bold; background: transparent; border: none;")
+        self.title_lbl.setWordWrap(False)
+        
+        # Formatting Duration
+        duration_s = track['duration_ms'] // 1000
+        mins = duration_s // 60
+        secs = duration_s % 60
+        duration_str = f"{mins}:{secs:02d}"
+        
+        self.subtitle_lbl = QLabel(f"{track['artist']} • {duration_str}")
+        self.subtitle_lbl.setStyleSheet("color: #AAA; font-size: 12px; background: transparent; border: none;")
+        
+        info_l.addWidget(self.title_lbl)
+        info_l.addWidget(self.subtitle_lbl)
+        layout.addLayout(info_l)
+        
+        layout.addStretch()
+        
+        # 3. Actions
+        self.actions_layout = QHBoxLayout()
+        self.actions_layout.setSpacing(10)
+        
+        if track['preview_url']:
+            self.btn_preview = QPushButton("▶")
+            self.btn_preview.setToolTip("Ouvir prévia")
+            self.btn_preview.setFixedSize(32, 32)
+            self.btn_preview.setCursor(Qt.PointingHandCursor)
+            self.btn_preview.setStyleSheet("background: #333; color: white; border-radius: 16px; font-weight: bold;")
+            self.actions_layout.addWidget(self.btn_preview)
+            
+        self.btn_dl = QPushButton("📥" if not is_downloaded else "✅")
+        self.btn_dl.setToolTip("Baixar para o Jogo" if not is_downloaded else "Já baixado")
+        self.btn_dl.setFixedSize(32, 32)
+        self.btn_dl.setCursor(Qt.PointingHandCursor)
+        self.btn_dl.setEnabled(not is_downloaded)
+        self.btn_dl.setStyleSheet(f"background: {'#1DB954' if not is_downloaded else '#444'}; color: white; border-radius: 16px; font-weight: bold;")
+        self.actions_layout.addWidget(self.btn_dl)
+        
+        layout.addLayout(self.actions_layout)
+
+    def set_image(self, pixmap):
+        if pixmap and not pixmap.isNull():
+            self.img_label.setPixmap(pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.img_label.setText("") 
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.track)
+
+
+class SpotifyLoginThread(QThread):
+    finished = pyqtSignal(bool, list) # success, playlists
+
+    def __init__(self, service):
+        super().__init__()
+        self.service = service
+
+    def run(self):
+        try:
+            success = self.service.authenticate()
+            if success:
+                playlists = self.service.get_playlists()
+                self.finished.emit(True, playlists)
+            else:
+                self.finished.emit(False, [])
+        except Exception as e:
+            print(f"DEBUG Spotify Thread Error: {e}")
+            self.finished.emit(False, [])
+
+class SpotifyTracksThread(QThread):
+    finished = pyqtSignal(list, int) # tracks, request_id
+
+    def __init__(self, service, playlist_id, request_id):
+        super().__init__()
+        self.service = service
+        self.playlist_id = playlist_id
+        self.request_id = request_id
+
+    def run(self):
+        try:
+            tracks = self.service.get_playlist_tracks(self.playlist_id)
+            # Check for downloaded status in BACKGROUND thread
+            for t in tracks:
+                safe_name = "".join([c for c in f"{t['artist']} - {t['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+                path = os.path.join("assets", "music", "spotify", f"{safe_name}.mp3")
+                t['is_downloaded'] = os.path.exists(path)
+            
+            self.finished.emit(tracks, self.request_id)
+        except Exception as e:
+            print(f"DEBUG Spotify Tracks Error: {e}")
+            self.finished.emit([], self.request_id)
 
 class ModernMenuQt(QMainWindow):
-    song_ready = pyqtSignal(str, str, list, dict) 
+    song_ready = pyqtSignal(str, str, list, dict, dict) # Added metadata dict
+    playlist_ready = pyqtSignal(list, str, dict)
     download_finished_signal = pyqtSignal(str, str)
     download_progress_signal = pyqtSignal(float)
 
@@ -39,15 +231,18 @@ class ModernMenuQt(QMainWindow):
         
         self.settings_manager = SettingsManager()
         self.selected_song = songs[0]["path"] if songs else None
+        self.selected_song_metadata = songs[0] if songs else {} # Store full metadata
         self.song_cards = {} # TRACK SONG CARDS
         
         # Signal Connections
         self.download_finished_signal.connect(self._finish_yt_download)
         self.download_progress_signal.connect(self._update_yt_progress)
         
-        # Background Analysis
         self.analysis_manager = None
-        # Toast removed
+        # Image Manager (SAFE INIT)
+        self.image_manager = get_image_manager()
+        # Track Loading Request Counter
+        self.spotify_request_counter = 0
         
         if results:
             print("DEBUG: Scheduling show_results...")
@@ -83,11 +278,21 @@ class ModernMenuQt(QMainWindow):
         self.nav_musics.setChecked(True)
         self.switch_page(0)
         
-        # Initial Logic (This triggers populate_tabs and analysis_manager)
-        self.refresh_library()
-        
-        if self.selected_song:
-            self.select_song(self.selected_song)
+        # Initial Logic: Use the passed songs directly to avoid redundant scan
+        if self.songs:
+            self.populate_tabs(self.songs)
+            # Start Background Analysis
+            song_paths = [s["path"] for s in self.songs]
+            max_para = self.settings_manager.settings.get("max_parallel_analysis", 1)
+            self.analysis_manager = AnalysisManager(song_paths, max_threads=max_para)
+            self.analysis_manager.worker_progress.connect(self.on_analysis_progress)
+            self.analysis_manager.worker_finished.connect(self.on_analysis_step_finished)
+            self.analysis_manager.worker_diff_finished.connect(self.on_diff_finished)
+            
+            if self.selected_song:
+                self.select_song(self.selected_song)
+        else:
+            self.refresh_library()
 
         # 4. Apply Initial Settings
         mvol = self.settings_manager.settings.get("music_volume", 100)
@@ -100,12 +305,14 @@ class ModernMenuQt(QMainWindow):
         if self.analysis_manager:
             self.analysis_manager.stop()
         if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
-            self.preview_thread.stop_flag = True # Add flag if needed, or terminate
-            self.preview_thread.terminate()
-            self.preview_thread.wait()
+            self.preview_thread.stop()
+            # Still using wait here? 
+            # On close, it's safer to just signal and let it finish.
+            # But we want to ensure it doesn't try to access widgets.
+            
         if hasattr(self, 'game_analysis_thread') and isinstance(self.game_analysis_thread, QThread) and self.game_analysis_thread.isRunning():
-            self.game_analysis_thread.terminate()
-            self.game_analysis_thread.wait()
+            self.game_analysis_thread.stop()
+        
         event.accept()
 
     def init_sidebar(self):
@@ -569,11 +776,36 @@ class ModernMenuQt(QMainWindow):
         content_layout.setContentsMargins(0,0,0,0)
         
         # Playlists Combo
+        p_layout = QHBoxLayout()
+        pk_l = QVBoxLayout()
+        pk_l.addWidget(QLabel("Select Playlist:"))
         self.playlist_combo = QComboBox()
         self.playlist_combo.setStyleSheet(styles.INPUT_STYLE)
         self.playlist_combo.currentIndexChanged.connect(self.load_spotify_tracks_from_combo)
-        content_layout.addWidget(QLabel("Select Playlist:"))
-        content_layout.addWidget(self.playlist_combo)
+        pk_l.addWidget(self.playlist_combo)
+        p_layout.addLayout(pk_l, stretch=2)
+        
+        # Difficulty for Spotify
+        df_l = QVBoxLayout()
+        df_l.addWidget(QLabel("Game Difficulty:"))
+        self.spotify_diff_combo = QComboBox()
+        self.spotify_diff_combo.addItems(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"])
+        self.spotify_diff_combo.setCurrentText(self.diff_combo.currentText())
+        self.spotify_diff_combo.setFixedHeight(45)
+        self.spotify_diff_combo.setStyleSheet(self.diff_combo.styleSheet())
+        
+        # Sync them
+        self.spotify_diff_combo.currentTextChanged.connect(self.diff_combo.setCurrentText)
+        self.diff_combo.currentTextChanged.connect(self.spotify_diff_combo.setCurrentText)
+        
+        for i, d in enumerate(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"]):
+            from PyQt5.QtGui import QColor
+            self.spotify_diff_combo.setItemData(i, QColor(styles.DIFFICULTY_COLORS[d]), Qt.ForegroundRole)
+            
+        df_l.addWidget(self.spotify_diff_combo)
+        p_layout.addLayout(df_l, stretch=1)
+        
+        content_layout.addLayout(p_layout)
         
         # Tracks List
         scroll = QScrollArea()
@@ -587,6 +819,24 @@ class ModernMenuQt(QMainWindow):
         
         scroll.setWidget(tracks_widget)
         content_layout.addWidget(scroll)
+
+        # Playlist Controls
+        playlist_controls = QHBoxLayout()
+        playlist_controls.setContentsMargins(40, 10, 40, 20)
+        
+        self.btn_download_playlist = QPushButton("📥  DOWNLOAD PLAYLIST")
+        self.btn_download_playlist.setFixedHeight(50)
+        self.btn_download_playlist.setStyleSheet(styles.BUTTON_PRIMARY_STYLE.replace(styles.COLOR_ACCENT, "#333").replace("#000", "#FFF"))
+        self.btn_download_playlist.clicked.connect(self.download_entire_playlist)
+        
+        self.btn_play_playlist = QPushButton("🎮  PLAY ALL SHUFFLE")
+        self.btn_play_playlist.setFixedHeight(50)
+        self.btn_play_playlist.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        self.btn_play_playlist.clicked.connect(self.play_entire_playlist)
+        
+        playlist_controls.addWidget(self.btn_download_playlist)
+        playlist_controls.addWidget(self.btn_play_playlist)
+        content_layout.addLayout(playlist_controls)
         
         layout.addWidget(self.spotify_content)
         self.stack.addWidget(page)
@@ -652,64 +902,198 @@ class ModernMenuQt(QMainWindow):
         self.spotify_login_btn.setText("Connecting...")
         self.spotify_login_btn.setEnabled(False)
         
-        # Simplified sync for now as authentication might open browser
-        # In a real app, use threading to prevent freeze
-        try:
-            success = self.spotify_service.authenticate()
-        except: success = False
-        
+        # Using a thread to prevent freezing during Browser/API dance
+        self.login_thread = SpotifyLoginThread(self.spotify_service)
+        self.login_thread.finished.connect(self.on_spotify_login_done)
+        self.login_thread.start()
+
+    def on_spotify_login_done(self, success, playlists):
         if success:
             self.spotify_login_btn.setVisible(False)
             self.spotify_content.setVisible(True)
-            self.load_spotify_playlists()
+            self.load_spotify_playlists_data(playlists)
         else:
-            self.spotify_login_btn.setText("Connection Failed. Check .env")
+            self.spotify_login_btn.setText("Connection Failed")
             self.spotify_login_btn.setEnabled(True)
+            QMessageBox.critical(self, "Spotify Error", "Não foi possível conectar. Verifique seu navegador ou o arquivo .env!")
 
-    def load_spotify_playlists(self):
-        playlists = self.spotify_service.get_playlists()
+    def load_spotify_playlists_data(self, playlists):
         self.playlist_combo.clear()
         self.spotify_playlists_data = playlists
-        
         for p in playlists:
             self.playlist_combo.addItem(f"{p['name']} ({p['tracks_total']} tracks)", p['id'])
+        
+        if playlists:
+            self.load_spotify_tracks_from_combo(0)
 
     def load_spotify_tracks_from_combo(self, idx):
         if idx < 0: return
         playlist_id = self.spotify_combo_data(idx)
         if not playlist_id: return
         
-        # Clear tracks
-        while self.spotify_tracks_layout.count():
-            c = self.spotify_tracks_layout.takeAt(0)
-            if c.widget(): c.widget().deleteLater()
-            
-        tracks = self.spotify_service.get_playlist_tracks(playlist_id)
+        self.spotify_request_counter += 1
+        req_id = self.spotify_request_counter
         
-        for t in tracks:
-            # Create a simple card for each track
-            card = QFrame()
-            card.setStyleSheet("background: #222; border-radius: 8px; padding: 10px;")
-            card.setFixedHeight(60)
-            cl = QHBoxLayout(card)
-            cl.setContentsMargins(5,5,5,5)
+        # Clear tracks and show loading
+        while self.spotify_tracks_layout.count():
+            item = self.spotify_tracks_layout.takeAt(0)
+            if item.widget(): 
+                item.widget().deleteLater()
             
-            # Simple Image Load (Blocking - should be async in prod)
-            # if t['image']: ...
+        loading_lbl = QLabel("⌛  Loading tracks...")
+        loading_lbl.setStyleSheet("color: #AAA; font-size: 14px; margin: 20px;")
+        loading_lbl.setAlignment(Qt.AlignCenter)
+        self.spotify_tracks_layout.insertWidget(0, loading_lbl)
+        
+        # Async Load
+        self.tracks_thread = SpotifyTracksThread(self.spotify_service, playlist_id, req_id)
+        self.tracks_thread.finished.connect(lambda tracks, rid: self.on_spotify_tracks_loaded(tracks, rid, loading_lbl))
+        self.tracks_thread.start()
+
+    def on_spotify_tracks_loaded(self, tracks, request_id, loading_lbl):
+        if request_id != self.spotify_request_counter: return
             
-            lbl = QLabel(f"{t['name']} - {t['artist']}")
-            lbl.setStyleSheet("color: white; font-size: 14px;")
-            cl.addWidget(lbl)
+        try: loading_lbl.deleteLater()
+        except: pass
+        
+        self.current_spotify_tracks = tracks
+        self._tracks_to_add = list(tracks)
+        self._add_track_batch(request_id)
+
+    def _add_track_batch(self, rid):
+        # Safety: If user switched, stop current batching
+        if rid != self.spotify_request_counter: return
+        
+        batch_size = 3
+        for _ in range(batch_size):
+            if not self._tracks_to_add: return
+            t = self._tracks_to_add.pop(0)
+            
+            card = SpotifyTrackCard(t, is_downloaded=t.get('is_downloaded', False))
+            card.btn_dl.clicked.connect(lambda _, track=t, c=card: self.download_spotify_track(track, c.btn_dl))
             
             if t['preview_url']:
-                btn_preview = QPushButton("▶")
-                btn_preview.setFixedSize(30, 30)
-                btn_preview.setStyleSheet("background: #1DB954; color: white; border-radius: 15px;")
-                # Use lambda default arg to capture track url
-                btn_preview.clicked.connect(lambda _, url=t['preview_url']: self.play_spotify_preview(url))
-                cl.addWidget(btn_preview)
+                card.btn_preview.clicked.connect(lambda _, url=t['preview_url']: self.play_spotify_preview(url))
             
             self.spotify_tracks_layout.insertWidget(self.spotify_tracks_layout.count()-1, card)
+            
+            # Async Image Load using Native Qt Manager
+            if t['image']:
+                self.image_manager.load(t['image'], card)
+        
+        QTimer.singleShot(50, lambda: self._add_track_batch(rid))
+
+    def download_spotify_track(self, track, button=None):
+        if button:
+            button.setText("⏳")
+            button.setEnabled(False)
+            
+        def _on_done(file_path):
+            if "ERROR" in file_path:
+                if button: 
+                    button.setText("❌")
+                    button.setEnabled(True)
+                return
+            
+            # Move to spotify folder
+            spotify_dir = os.path.join("assets", "music", "spotify")
+            if not os.path.exists(spotify_dir): os.makedirs(spotify_dir)
+            
+            safe_name = "".join([c for c in f"{track['artist']} - {track['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+            final_dest = os.path.join(spotify_dir, f"{safe_name}.mp3")
+            
+            try:
+                import shutil
+                shutil.move(file_path, final_dest)
+                if button: button.setText("✅")
+                # Refresh UI or just notify
+            except:
+                if button: button.setText("??")
+
+        # Search on YouTube
+        query = f"{track['artist']} - {track['name']} audio"
+        results = self.youtube_service.search(query, limit=1)
+        if results:
+            self.youtube_service.download_audio(results[0]['id'], callback=_on_done)
+        else:
+            if button: button.setText("N/A")
+
+    def download_entire_playlist(self):
+        if not hasattr(self, 'current_spotify_tracks'): return
+        self.btn_download_playlist.setText("📥 Downloading List...")
+        self.btn_download_playlist.setEnabled(False)
+        
+        def _worker():
+            tracks_to_dl = []
+            for t in self.current_spotify_tracks:
+                safe_name = "".join([c for c in f"{t['artist']} - {t['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+                path = os.path.join("assets", "music", "spotify", f"{safe_name}.mp3")
+                if not os.path.exists(path):
+                    tracks_to_dl.append(t)
+            
+            total = len(tracks_to_dl)
+            for i, track in enumerate(tracks_to_dl):
+                self.btn_download_playlist.setText(f"📥 DL: {i+1}/{total}")
+                self.download_spotify_track(track)
+                import time
+                time.sleep(1.5)
+            
+            self.btn_download_playlist.setText("📥 Download All")
+            self.btn_download_playlist.setEnabled(True)
+            
+        import threading
+        threading.Thread(target=_worker).start()
+
+
+    def play_entire_playlist(self):
+        if not hasattr(self, 'current_spotify_tracks'): return
+        
+        import random
+        play_list = []
+        for t in self.current_spotify_tracks:
+            # More robust name cleaning to match download_spotify_track
+            safe_name = "".join([c for c in f"{t['artist']} - {t['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+            path = os.path.normpath(os.path.join("assets", "music", "spotify", f"{safe_name}.mp3"))
+            
+            if os.path.exists(path):
+                play_list.append(path)
+                # Ensure it's in our library so run.py can find metadata
+                if not any(os.path.normpath(s["path"]) == path for s in self.songs):
+                    self.songs.append({
+                        "path": path,
+                        "title": t["name"],
+                        "artist": t["artist"],
+                        "image": t["image"]
+                    })
+            else:
+                print(f"DEBUG Playlist: Missing {path}")
+        
+        if not play_list:
+            QMessageBox.warning(self, "No Songs", "Nenhuma música da playlist foi encontrada na pasta spotify. Verifique se os downloads foram concluídos!")
+            return
+            
+        # Shuffle!
+        random.shuffle(play_list)
+        print(f"DEBUG: Starting playlist with {len(play_list)} songs shuffled.")
+            
+        diff = self.diff_combo.currentText()
+        custom = {
+            "scroll_speed": self.speed_slider.value(),
+            "chord_chance": self.chord_slider.value(),
+            "hold_chance": self.hold_slider.value(),
+            "smart_speed": self.chk_smart_speed.isChecked(),
+            "hidden_notes": self.chk_hidden_notes.isChecked(),
+            "sudden_notes": self.chk_sudden_notes.isChecked(),
+            "flashlight_mode": self.chk_flashlight.isChecked(),
+            "rainbow_road": self.chk_rainbow.isChecked(),
+            "confetti_hit": self.chk_confetti.isChecked(),
+            "drunk_mode": self.chk_drunk.isChecked(),
+            "giant_tiles": self.chk_giant.isChecked(),
+            "selected_skin": self.skin_combo.currentText()
+        }
+        
+        # We don't have beats pre-calculated for all, but run.py can handle that
+        self.playlist_ready.emit(play_list, diff, custom)
 
     def spotify_combo_data(self, idx):
         if 0 <= idx < len(self.spotify_playlists_data):
@@ -834,9 +1218,8 @@ class ModernMenuQt(QMainWindow):
                             reply.deleteLater()
                             return
                         
-                        data = reply.readAll()
                         pixmap = QPixmap()
-                        pixmap.loadFromData(data)
+                        pixmap.loadFromData(reply.readAll())
                         if not pixmap.isNull():
                             # Scale to btn size
                             icon = QIcon(pixmap.scaled(120, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -892,22 +1275,6 @@ class ModernMenuQt(QMainWindow):
             
             self.yt_results_layout.insertWidget(self.yt_results_layout.count()-1, card)
 
-    def download_and_play_youtube(self, video_id, title):
-        self.yt_status.setText(f"Downloading '{title}'... Please wait.")
-        self.yt_progress.setVisible(True)
-        self.yt_progress.setValue(0)
-        
-        # We need a slot for thread-safety updates
-        # Since we are in a lambda/thread scope, we can use QMetaObject or signals.
-        # But for simplicity in this structure without defining a new signal on the class (which requires restart),
-        # we can use a small helper with QTimer or assume direct update works if called from hook (it might warn but often works in pyqt).
-        # BETTER: Use a defined signal. But I can't easily add a signal to the class definition dynamically.
-        # SAFE APPROACH: Use QTimer to poll or a thread-safe wrapper.
-        
-        # Actually, let's define a method on self that is thread-safe via QMetaObject.invokeMethod?
-        # Or just use the fact that I can't add signals now.
-        # Let's use a simple detailed approach:
-        
     def download_and_play_youtube(self, video_id, title):
         self.yt_status.setText(f"Downloading '{title}'... Please wait.")
         self.yt_progress.setVisible(True)
@@ -981,14 +1348,16 @@ class ModernMenuQt(QMainWindow):
 
     def select_song(self, song_path):
         self.selected_song = song_path
+        # Find the full song metadata
+        self.selected_song_metadata = next((s for s in self.songs if s["path"] == song_path), {})
         name = os.path.splitext(os.path.basename(song_path))[0]
         self.lbl_selected.setText(name.upper())
         self.lbl_selected.setStyleSheet(f"font-size: 18px; color: {styles.COLOR_ACCENT}; font-weight: bold;")
         
-        # Preview Logic
+        # Preview Logic: Use safe stop
         if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
-            self.preview_thread.terminate()
-            self.preview_thread.wait()
+            self.preview_thread.stop()
+            # DON'T wait on main thread, let it die in background
             
         self.preview_thread = AnalysisThread(song_path, "Normal")
         self.preview_thread.finished.connect(self.start_preview)
@@ -1016,8 +1385,8 @@ class ModernMenuQt(QMainWindow):
 
         # 3. Stop preview before starting game analysis
         if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
-            self.preview_thread.terminate()
-            self.preview_thread.wait()
+            self.preview_thread.stop()
+            # Again, don't wait, let it finish naturally
 
         self.game_analysis_thread = AnalysisThread(self.selected_song, self.diff_combo.currentText())
         self.game_analysis_thread.progress.connect(lambda v, m: self.prog_bar.setValue(int(v)))
@@ -1042,7 +1411,7 @@ class ModernMenuQt(QMainWindow):
             "selected_skin": self.skin_combo.currentText(),
             "custom_background": self.chk_custom_bg.isChecked()
         }
-        self.song_ready.emit(self.selected_song, self.diff_combo.currentText(), beats, custom)
+        self.song_ready.emit(self.selected_song, self.diff_combo.currentText(), beats, custom, self.selected_song_metadata)
         
     def open_library_manager(self):
         from src.ui.library_dialog import MusicLibraryDialog 
@@ -1328,17 +1697,32 @@ def run_menu(songs, audio_manager, discord_rpc=None, results=None):
     
     # Font Loader could go here
     
+    # Store results for return
+    result = {"song": None, "songs": [], "diff": "Normal", "beats": [], "custom": {}, "metadata": {}, "library": []}
+    
     window = ModernMenuQt(songs, audio_manager, discord_rpc, results)
     window.show()
     
-    result = {"song": None, "diff": "Normal", "beats": [], "custom": {}}
-    def handle_ready(song, diff, beats, custom):
+    def handle_ready(song, diff, beats, custom, metadata):
         result["song"] = song
         result["diff"] = diff
         result["beats"] = beats
         result["custom"] = custom
+        result["metadata"] = metadata
+        result["library"] = window.songs
+        window.close()
+
+    def handle_playlist(songs, diff, custom):
+        result["songs"] = songs
+        result["diff"] = diff
+        result["custom"] = custom
+        result["library"] = window.songs
         window.close()
     
     window.song_ready.connect(handle_ready)
+    window.playlist_ready.connect(handle_playlist)
     app.exec_()
-    return result["song"], result["diff"], result["beats"], result["custom"]
+    
+    if result["songs"]:
+        return result["songs"], result["diff"], [], result["custom"], result["metadata"], result["library"]
+    return result["song"], result["diff"], result["beats"], result["custom"], result["metadata"], result["library"]

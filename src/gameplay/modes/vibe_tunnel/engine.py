@@ -23,20 +23,35 @@ class VibeOrb:
         self.size = 5 + (self.dist * 30)
 
     def draw(self, screen, cx, cy, fever_mode=False):
-        if self.dist < 0: return
-        
+        # ALLOW negative dist for countdown visibility (appears near vanishing point)
+        visual_dist = self.dist
+        draw_opacity = 255
+        if visual_dist < 0:
+            # Squeeze to keep it near center and dim it
+            visual_dist = visual_dist / (1.0 - visual_dist / 0.5)
+            draw_opacity = 100
+
         # Calculate screen pos based on angle and dist
         # We use a non-linear dist for better 3D feel
-        screen_dist = (self.dist ** 2) * (constants.SCREEN_WIDTH // 2)
+        # Using abs() for visual_dist so they don't jump when passing center
+        screen_dist = (abs(visual_dist) ** 1.5) * (constants.SCREEN_WIDTH // 2)
         x = cx + math.cos(self.angle) * screen_dist
         y = cy + math.sin(self.angle) * screen_dist
         
         color = (0, 255, 255) if not fever_mode else (255, 255, 0)
-        pygame.draw.circle(screen, color, (int(x), int(y)), int(self.size))
-        pygame.draw.circle(screen, (255, 255, 255), (int(x), int(y)), int(self.size), 2)
+        
+        # Use alpha surface for dimming if needed
+        if draw_opacity < 255:
+            orb_surf = pygame.Surface((int(self.size*2+4), int(self.size*2+4)), pygame.SRCALPHA)
+            pygame.draw.circle(orb_surf, (*color, draw_opacity), (int(self.size+2), int(self.size+2)), int(self.size))
+            pygame.draw.circle(orb_surf, (255, 255, 255, draw_opacity), (int(self.size+2), int(self.size+2)), int(self.size), 2)
+            screen.blit(orb_surf, (int(x - self.size - 2), int(y - self.size - 2)))
+        else:
+            pygame.draw.circle(screen, color, (int(x), int(y)), int(self.size))
+            pygame.draw.circle(screen, (255, 255, 255), (int(x), int(y)), int(self.size), 2)
 
 class VibeTunnelEngine:
-    def __init__(self, screen, song_path, difficulty="Normal", custom_settings=None, song_duration=0, audio_manager=None):
+    def __init__(self, screen, song_path, difficulty="Normal", custom_settings=None, song_duration=0, audio_manager=None, current_meta=None, next_meta=None):
         self.screen = screen
         self.audio_manager = audio_manager
         self.song_path = song_path
@@ -118,8 +133,11 @@ class VibeTunnelEngine:
     def handle_keyup(self, lane_index, current_time):
         pass
 
-    def update(self, _, dt):
-        self.current_game_time += dt
+    def update(self, dt):
+        if self.audio_manager and self.audio_manager.is_playing:
+            self.current_game_time = self.audio_manager.get_pos()
+        else:
+            self.current_game_time += dt
         
         # Movement Input
         keys = pygame.key.get_pressed()

@@ -44,26 +44,36 @@ class Obstacle:
                 int(127 + 127 * math.sin(t + 2)),
                 int(127 + 127 * math.sin(t + 4))
             )
+            
+        # PERSPECTIVE SQUEEZE: Make off-screen obstacles visible on the right edge
+        visual_x = self.x
+        draw_opacity = 255
+        if visual_x > constants.SCREEN_WIDTH - 100:
+            # Squeeze X beyond screen edge into a 200px visible buffer
+            pivot = constants.SCREEN_WIDTH - 100
+            diff = visual_x - pivot
+            visual_x = pivot + (diff / (1.0 + diff / 400.0))
+            draw_opacity = int(255 * 0.5)
 
         if self.type == "spike":
-            pts = [(self.x, ground_y), (self.x + self.width, ground_y), (self.x + self.width//2, ground_y - self.height)]
-            pygame.draw.polygon(screen, draw_color, pts)
-            pygame.draw.polygon(screen, (255, 255, 255), pts, 2)
+            pts = [(visual_x, ground_y), (visual_x + self.width, ground_y), (visual_x + self.width//2, ground_y - self.height)]
+            pygame.draw.polygon(screen, (*draw_color, draw_opacity), pts)
+            pygame.draw.polygon(screen, (255, 255, 255, draw_opacity), pts, 2)
         elif self.type == "wall":
-            rect = pygame.Rect(self.x, ground_y - self.height - 60, self.width, self.height)
-            pygame.draw.rect(screen, draw_color, rect, border_radius=8)
-            pygame.draw.rect(screen, (255, 255, 255), rect, 2, border_radius=8)
+            rect = pygame.Rect(visual_x, ground_y - self.height - 60, self.width, self.height)
+            pygame.draw.rect(screen, (*draw_color, draw_opacity), rect, border_radius=8)
+            pygame.draw.rect(screen, (255, 255, 255, draw_opacity), rect, 2, border_radius=8)
         elif self.type == "orb":
-            center = (int(self.x + self.width//2), int(ground_y - 80))
-            pygame.draw.circle(screen, draw_color, center, self.width//2)
-            pygame.draw.circle(screen, (255, 255, 255), center, self.width//2, 2)
+            center = (int(visual_x + self.width//2), int(ground_y - 80))
+            pygame.draw.circle(screen, (*draw_color, draw_opacity), center, self.width//2)
+            pygame.draw.circle(screen, (255, 255, 255, draw_opacity), center, self.width//2, 2)
         elif self.type == "barrier":
-            rect = pygame.Rect(self.x, ground_y - self.height, self.width, self.height)
-            pygame.draw.rect(screen, draw_color, rect, border_radius=4)
-            pygame.draw.rect(screen, (255, 255, 255), rect, 2, border_radius=4)
+            rect = pygame.Rect(visual_x, ground_y - self.height, self.width, self.height)
+            pygame.draw.rect(screen, (*draw_color, draw_opacity), rect, border_radius=4)
+            pygame.draw.rect(screen, (255, 255, 255, draw_opacity), rect, 2, border_radius=4)
 
 class CyberRunEngine:
-    def __init__(self, screen, song_path, difficulty="Normal", custom_settings=None, song_duration=0, audio_manager=None):
+    def __init__(self, screen, song_path, difficulty="Normal", custom_settings=None, song_duration=0, audio_manager=None, current_meta=None, next_meta=None):
         self.screen = screen
         self.audio_manager = audio_manager
         self.song_path = song_path
@@ -192,8 +202,11 @@ class CyberRunEngine:
     def handle_keyup(self, lane_index, current_time):
         pass
 
-    def update(self, _, dt):
-        self.current_game_time += dt
+    def update(self, dt):
+        if self.audio_manager and self.audio_manager.is_playing:
+            self.current_game_time = self.audio_manager.get_pos()
+        else:
+            self.current_game_time += dt
         if self.dash_cooldown > 0: self.dash_cooldown -= dt
         if self.action_timer > 0:
             self.action_timer -= dt

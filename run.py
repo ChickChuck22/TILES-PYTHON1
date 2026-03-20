@@ -53,12 +53,13 @@ class PianoTilesApp:
                 if not self.selected_mode:
                     break # Exit App
 
-                # Load songs
-                folders = self.settings_manager.get_music_folders()
-                folders.append("assets/music")
-                folders.append(os.path.join("assets", "music", "youtube"))
-                folders.append(os.path.join("assets", "music", "spotify"))
-                songs = self.audio_manager.scan_library(folders)
+                # Load songs (Only if not already loaded or first time)
+                if not 'songs' in locals() or not songs:
+                    folders = self.settings_manager.get_music_folders()
+                    folders.append("assets/music")
+                    folders.append(os.path.join("assets", "music", "youtube"))
+                    folders.append(os.path.join("assets", "music", "spotify"))
+                    songs = self.audio_manager.scan_library(folders)
                 
                 last_results = None
                 
@@ -69,13 +70,55 @@ class PianoTilesApp:
                         except: pass
                     
                     from src.ui.modern_menu import run_menu
-                    selected_song, difficulty, beats, custom_settings = run_menu(songs, self.audio_manager, self.discord_rpc, results=last_results)
+                    selected_song, difficulty, beats, custom_settings, metadata, updated_songs = run_menu(songs, self.audio_manager, self.discord_rpc, results=last_results)
+                    if updated_songs:
+                        songs = updated_songs
                     last_results = None 
                     
                     if selected_song:
-                        self.init_game(selected_song, difficulty, beats, custom_settings)
-                        last_results = self.run_game_loop()
-                        pygame.display.quit()
+                        from src.ui.bootstrapper import run_bootstrapper
+                        
+                        if isinstance(selected_song, list):
+                            # Playlist Mode
+                            for i, song in enumerate(selected_song):
+                                print(f"Playing playlist song {i+1}/{len(selected_song)}: {song}")
+                                
+                                # Use Bootstrapper for Beats
+                                current_meta = next((s for s in songs if os.path.normpath(s["path"]) == os.path.normpath(song)), {})
+                                
+                                # Determine Next Song for UI
+                                next_meta = None
+                                if i + 1 < len(selected_song):
+                                    next_p = selected_song[i+1]
+                                    next_meta = next((s for s in songs if os.path.normpath(s["path"]) == os.path.normpath(next_p)), None)
+
+                                current_beats = run_bootstrapper(song, difficulty, custom_settings, current_meta)
+                                if current_beats is None: break # Skip if cancelled
+                                
+                                # Add metadata to game init
+                                self.init_game(song, difficulty, current_beats, custom_settings, current_meta, next_meta)
+                                last_results = self.run_game_loop()
+                                
+                                # If the game loop stopped but we aren't returning to menu, continue playlist
+                                # If self.running is False because of game_over, we WANT to continue.
+                                # If self.running is False because user closed window, we want to break.
+                                if not self.running and not getattr(self.game_engine, 'game_over', False):
+                                    break
+                                
+                                # Reset for next song
+                                self.running = True
+                                pygame.display.quit()
+                            
+                            # Clean up after playlist
+                            pygame.quit()
+                        else:
+                            # Single Song
+                            current_meta = next((s for s in songs if os.path.normpath(s["path"]) == os.path.normpath(selected_song)), {})
+                            current_beats = run_bootstrapper(selected_song, difficulty, custom_settings, current_meta)
+                            if current_beats is not None:
+                                self.init_game(selected_song, difficulty, current_beats, custom_settings, current_meta)
+                                last_results = self.run_game_loop()
+                                pygame.quit()
                     else:
                         # Exit back to Launcher
                         break
@@ -91,8 +134,13 @@ class PianoTilesApp:
             self.cleanup()
             sys.exit()
 
-    def init_game(self, song_name, difficulty, beats, custom_settings):
+    def init_game(self, song_name, difficulty, beats, custom_settings, current_meta=None, next_meta=None):
         print("Initializing game...")
+        self.selected_song_title = os.path.splitext(os.path.basename(song_name))[0]
+        self.selected_difficulty = difficulty
+        self.selected_custom_settings = custom_settings
+        self.current_meta = current_meta
+        self.next_meta = next_meta
         
         # Force re-init display to avoid "video system not initialized" after Qt
         if pygame.display.get_init():
@@ -117,6 +165,7 @@ class PianoTilesApp:
         import src.core.constants as constants
         constants.SCREEN_WIDTH = target_w
         constants.SCREEN_HEIGHT = target_h
+        constants.LANE_WIDTH = target_w // 4 # Fix stale constant
         global SCREEN_WIDTH, SCREEN_HEIGHT
         SCREEN_WIDTH, SCREEN_HEIGHT = target_w, target_h
         
@@ -134,25 +183,26 @@ class PianoTilesApp:
         self.running = True
         self.return_to_menu = False
         
-        if os.path.isabs(song_name):
+        if os.path.isabs(song_name) or song_name.startswith("assets"):
             song_path = song_name
         else:
-            song_path = os.path.join("assets/music", song_name)
+            song_path = os.path.join("assets", "music", song_name)
         if self.audio_manager.load_song(song_path):
             duration = self.audio_manager.song_duration
             
             # Select Engine based on Mode
             if self.selected_mode == "classic":
-                self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+                self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager, self.current_meta, self.next_meta)
             elif self.selected_mode == "cyber_run":
-                self.game_engine = CyberRunEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+                self.game_engine = CyberRunEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager, self.current_meta, self.next_meta)
             elif self.selected_mode == "vibe_tunnel":
-                self.game_engine = VibeTunnelEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+                self.game_engine = VibeTunnelEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager, self.current_meta, self.next_meta)
             else:
                 # Default to classic if mode is not recognized or not set
-                self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager)
+                self.game_engine = GameEngine(self.screen, song_path, difficulty, custom_settings, duration, self.audio_manager, self.current_meta, self.next_meta)
             
             self.game_engine.set_beats(beats)
+            self.game_engine.countdown_start = pygame.time.get_ticks()
             self.state_manager.change_state(GameState.COUNTDOWN)
             print(f"Game engine created for mode: {self.selected_mode}")
         else:
@@ -233,21 +283,20 @@ class PianoTilesApp:
 
     def update(self, dt):
         state = self.state_manager.get_state()
-        if state == GameState.COUNTDOWN:
-            elapsed = (pygame.time.get_ticks() - self.game_engine.countdown_start) / 1000.0
-            if elapsed >= 3.0:
-                self.state_manager.change_state(GameState.GAMEPLAY)
-                if getattr(self, 'is_resuming', False):
-                    self.audio_manager.unpause()
-                    self.is_resuming = False
-                # DO NOT play music here otherwise (Engine handles initial start)
-            else:
-                self.game_engine.countdown = 3 - int(elapsed)
-        elif state == GameState.GAMEPLAY:
+        if state in [GameState.COUNTDOWN, GameState.GAMEPLAY]:
             if self.game_engine:
-                # We let the engine manage its time (starts at -3.0)
-                # calculate proper dt
-                self.game_engine.update(0, dt)
+                self.game_engine.update(dt)
+                
+            if state == GameState.COUNTDOWN:
+                elapsed = (pygame.time.get_ticks() - self.game_engine.countdown_start) / 1000.0
+                if elapsed >= 3.0:
+                    self.state_manager.change_state(GameState.GAMEPLAY)
+                    self.audio_manager.play()
+                    if getattr(self, 'is_resuming', False):
+                        self.audio_manager.unpause()
+                        self.is_resuming = False
+                else:
+                    self.game_engine.countdown = 3 - int(elapsed)
                 
                 # Discord RPC Update (Every 5s)
                 now = pygame.time.get_ticks()
@@ -299,9 +348,7 @@ class PianoTilesApp:
                             self.game_engine.max_combo
                         )
 
-                        # Small delay before exiting (simulated by not returning immediately if we wanted visuals)
-                        # But for now, let's just exit to show the menu
-                        pygame.time.wait(1000) 
+                        # Rapid transition for playlists
                         self.running = False
 
                     self.audio_manager.stop()
@@ -318,7 +365,7 @@ class PianoTilesApp:
         state = self.state_manager.get_state()
         if state in [GameState.COUNTDOWN, GameState.GAMEPLAY, GameState.GAME_OVER, GameState.PAUSED]:
             if self.game_engine:
-                current_time = self.audio_manager.get_pos()
+                current_time = self.game_engine.current_game_time
                 self.game_engine.draw(current_time)
             if state == GameState.COUNTDOWN:
                 font = pygame.font.SysFont("Arial", 140, bold=True)

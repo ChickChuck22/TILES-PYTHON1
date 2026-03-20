@@ -13,6 +13,22 @@ class AudioManager:
         self.sfx = {}
         self.music_volume = 1.0
         self.sfx_volume = 1.0
+        self._metadata_cache_file = "metadata_cache.json"
+        self._metadata_cache = {}
+        self.load_metadata_cache()
+        
+    def load_metadata_cache(self):
+        if os.path.exists(self._metadata_cache_file):
+            try:
+                with open(self._metadata_cache_file, 'r', encoding='utf-8') as f:
+                    self._metadata_cache = json.load(f)
+            except: self._metadata_cache = {}
+            
+    def save_metadata_cache(self):
+        try:
+            with open(self._metadata_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self._metadata_cache, f, indent=2)
+        except: pass
 
     def load_sfx(self, name, path):
         """Loads a sound effect into memory."""
@@ -75,18 +91,29 @@ class AudioManager:
             except:
                 pass
 
-    def load_song(self, song_path):
-        try:
-            pygame.mixer.music.load(song_path)
-            self.current_song_path = song_path
-            # Reset playing state because load stops the previous music
-            self.is_playing = False
-            audio = MP3(song_path)
-            self.song_duration = audio.info.length
-            return True
-        except Exception as e:
-            print(f"Error loading song: {e}")
-            return False
+    def load_song(self, path):
+        """Loads a song for playback with retry for Windows file conflicts."""
+        import time
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.stop()
+                pygame.mixer.music.load(path)
+                self.current_song_path = path
+                
+                # Get duration
+                from mutagen import File as MutagenFile
+                audio = MutagenFile(path)
+                self.song_duration = audio.info.length if audio else 0
+                return True
+            except Exception as e:
+                print(f"Load Attempt {i+1} Failed: {e}")
+                if i < max_retries - 1:
+                    time.sleep(0.2) # Wait for other threads (analysis) to release handle
+                else:
+                    return False
+        return False
 
     def play(self):
         if self.current_song_path:
@@ -112,8 +139,14 @@ class AudioManager:
     def get_pos(self):
         """Returns current playback position in seconds."""
         if self.is_playing:
-            return pygame.mixer.music.get_pos() / 1000.0
+            pos = pygame.mixer.music.get_pos()
+            if pos < 0: return 0 # Music might have finished
+            return pos / 1000.0
         return 0
+
+    def get_busy(self):
+        """Checks if music is actually playing in the hardware mixer."""
+        return pygame.mixer.music.get_busy()
 
     def list_songs(self, directory):
         import subprocess # Local import to avoid changing file header for now
@@ -222,7 +255,19 @@ class AudioManager:
                     norm_path = os.path.normpath(full_path)
                     
                     if norm_path.lower() not in seen_paths:
-                        metadata = self.get_metadata(full_path)
+                        # Check cache vs mtime
+                        mtime = os.path.getmtime(full_path)
+                        cache_entry = self._metadata_cache.get(norm_path.lower())
+                        
+                        if cache_entry and cache_entry.get("mtime") == mtime:
+                            metadata = cache_entry["metadata"]
+                        else:
+                            metadata = self.get_metadata(full_path)
+                            self._metadata_cache[norm_path.lower()] = {
+                                "mtime": mtime,
+                                "metadata": metadata
+                            }
+                            
                         all_songs.append({
                             "path": full_path,
                             **metadata
@@ -231,4 +276,5 @@ class AudioManager:
             except Exception as e:
                 print(f"Error scanning {folder}: {e}")
                 
+        self.save_metadata_cache()
         return all_songs
