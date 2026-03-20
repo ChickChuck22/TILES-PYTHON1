@@ -1,0 +1,1728 @@
+import sys
+import os
+import threading
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, 
+    QLabel, QPushButton, QHBoxLayout, QStackedWidget, 
+    QScrollArea, QFrame, QLineEdit, QComboBox, QSlider,
+    QCheckBox, QProgressBar, QFileDialog, QMessageBox,
+    QGraphicsDropShadowEffect, QButtonGroup, QDialog, QSizePolicy, QTabWidget,
+    QListWidget, QListWidgetItem
+)
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, pyqtSlot, QThread, QUrl, QTimer, QObject
+from PyQt5.QtGui import QIcon, QFont, QPixmap, QColor, QFontMetrics
+
+# Local imports
+from src.core.settings import SettingsManager
+import src.ui.styles as styles
+from src.ui.results import ResultsDialog
+from src.ui.widgets import ModernSongCard
+from src.services.discord_rpc import DiscordRPC
+from src.services.spotify_service import SpotifyService
+from src.services.youtube_service import YouTubeService
+from src.core.analysis_manager import AnalysisManager, AnalysisThread
+
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PyQt5 import sip
+
+class ImageManager(QObject):
+    """Native Qt asynchronous image manager."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nam = QNetworkAccessManager()
+        self.cache = {} # url -> pixmap
+
+    def load(self, url, target_widget):
+        if not url or not url.startswith("http"): return
+        
+        # Check if underlying C++ object was deleted? (Common across QApp restarts)
+        if sip.isdeleted(self.nam):
+            print("DEBUG: QNetworkAccessManager was deleted, recreating...")
+            self.nam = QNetworkAccessManager()
+            
+        if url in self.cache:
+            target_widget.set_image(self.cache[url])
+            return
+
+        req = QNetworkRequest(QUrl(url))
+        reply = self.nam.get(req)
+        reply.finished.connect(lambda: self._on_finish(url, reply, target_widget))
+
+    def _on_finish(self, url, reply, target_widget):
+        try:
+            data = reply.readAll()
+            pixmap = QPixmap()
+            if pixmap.loadFromData(data):
+                self.cache[url] = pixmap
+                
+                # Disk Cache for Gameplay (Pygame needs a file)
+                if url.startswith("http"):
+                    try:
+                        import hashlib
+                        cache_dir = os.path.join("assets", "cache", "images")
+                        os.makedirs(cache_dir, exist_ok=True)
+                        h = hashlib.md5(url.encode()).hexdigest()
+                        path = os.path.join(cache_dir, f"{h}.png")
+                        if not os.path.exists(path):
+                            pixmap.save(path, "PNG")
+                    except: pass
+
+                try: target_widget.set_image(pixmap)
+                except: pass
+        except Exception as e:
+            print(f"Image Load Async Error: {e}")
+        finally:
+            reply.deleteLater()
+
+_IMAGE_MANAGER = None
+def get_image_manager():
+    global _IMAGE_MANAGER
+    if _IMAGE_MANAGER is None:
+        _IMAGE_MANAGER = ImageManager()
+    return _IMAGE_MANAGER
+
+class SpotifyTrackCard(QFrame):
+    clicked = pyqtSignal(dict)
+    download_clicked = pyqtSignal(dict, QPushButton)
+
+    def __init__(self, track, is_downloaded=False):
+        super().__init__()
+        self.track = track
+        self.is_downloaded = is_downloaded
+        self.setObjectName("SpotifyCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(80)
+        self.setStyleSheet("""
+            QFrame#SpotifyCard {
+                background-color: #1E1E1E;
+                border-radius: 12px;
+                border: 1px solid #333;
+            }
+            QFrame#SpotifyCard:hover {
+                background-color: #252525;
+                border: 1px solid #1DB954;
+            }
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 15, 10)
+        layout.setSpacing(15)
+        
+        # 1. Image
+        self.img_label = QLabel()
+        self.img_label.setFixedSize(60, 60)
+        self.img_label.setStyleSheet("background-color: #121212; border-radius: 6px;")
+        self.img_label.setScaledContents(True)
+        # Placeholder
+        self.img_label.setText("🎵")
+        self.img_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.img_label)
+        
+        # 2. Info
+        info_l = QVBoxLayout()
+        info_l.setSpacing(2)
+        
+        self.title_lbl = QLabel(track['name'])
+        self.title_lbl.setStyleSheet("color: white; font-size: 15px; font-weight: bold; background: transparent; border: none;")
+        self.title_lbl.setWordWrap(False)
+        
+        # Formatting Duration
+        duration_s = track['duration_ms'] // 1000
+        mins = duration_s // 60
+        secs = duration_s % 60
+        duration_str = f"{mins}:{secs:02d}"
+        
+        self.subtitle_lbl = QLabel(f"{track['artist']} • {duration_str}")
+        self.subtitle_lbl.setStyleSheet("color: #AAA; font-size: 12px; background: transparent; border: none;")
+        
+        info_l.addWidget(self.title_lbl)
+        info_l.addWidget(self.subtitle_lbl)
+        layout.addLayout(info_l)
+        
+        layout.addStretch()
+        
+        # 3. Actions
+        self.actions_layout = QHBoxLayout()
+        self.actions_layout.setSpacing(10)
+        
+        if track['preview_url']:
+            self.btn_preview = QPushButton("▶")
+            self.btn_preview.setToolTip("Ouvir prévia")
+            self.btn_preview.setFixedSize(32, 32)
+            self.btn_preview.setCursor(Qt.PointingHandCursor)
+            self.btn_preview.setStyleSheet("background: #333; color: white; border-radius: 16px; font-weight: bold;")
+            self.actions_layout.addWidget(self.btn_preview)
+            
+        self.btn_dl = QPushButton("📥" if not is_downloaded else "✅")
+        self.btn_dl.setToolTip("Baixar para o Jogo" if not is_downloaded else "Já baixado")
+        self.btn_dl.setFixedSize(32, 32)
+        self.btn_dl.setCursor(Qt.PointingHandCursor)
+        self.btn_dl.setEnabled(not is_downloaded)
+        self.btn_dl.setStyleSheet(f"background: {'#1DB954' if not is_downloaded else '#444'}; color: white; border-radius: 16px; font-weight: bold;")
+        self.actions_layout.addWidget(self.btn_dl)
+        
+        layout.addLayout(self.actions_layout)
+
+    def set_image(self, pixmap):
+        if pixmap and not pixmap.isNull():
+            self.img_label.setPixmap(pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.img_label.setText("") 
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.track)
+
+
+class SpotifyLoginThread(QThread):
+    finished = pyqtSignal(bool, list) # success, playlists
+
+    def __init__(self, service):
+        super().__init__()
+        self.service = service
+
+    def run(self):
+        try:
+            success = self.service.authenticate()
+            if success:
+                playlists = self.service.get_playlists()
+                self.finished.emit(True, playlists)
+            else:
+                self.finished.emit(False, [])
+        except Exception as e:
+            print(f"DEBUG Spotify Thread Error: {e}")
+            self.finished.emit(False, [])
+
+class SpotifyTracksThread(QThread):
+    finished = pyqtSignal(list, int) # tracks, request_id
+
+    def __init__(self, service, playlist_id, request_id):
+        super().__init__()
+        self.service = service
+        self.playlist_id = playlist_id
+        self.request_id = request_id
+
+    def run(self):
+        try:
+            tracks = self.service.get_playlist_tracks(self.playlist_id)
+            # Check for downloaded status in BACKGROUND thread
+            for t in tracks:
+                safe_name = "".join([c for c in f"{t['artist']} - {t['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+                path = os.path.join("assets", "music", "spotify", f"{safe_name}.mp3")
+                t['is_downloaded'] = os.path.exists(path)
+            
+            self.finished.emit(tracks, self.request_id)
+        except Exception as e:
+            print(f"DEBUG Spotify Tracks Error: {e}")
+            self.finished.emit([], self.request_id)
+
+class ModernMenuQt(QMainWindow):
+    song_ready = pyqtSignal(str, str, list, dict, dict) # Added metadata dict
+    playlist_ready = pyqtSignal(list, str, dict)
+    download_finished_signal = pyqtSignal(str, str)
+    download_progress_signal = pyqtSignal(float)
+
+    def __init__(self, songs, audio_manager, discord_rpc=None, results=None):
+        super().__init__()
+        self.songs = songs
+        self.audio_manager = audio_manager
+        self.discord_rpc = discord_rpc
+
+        if self.discord_rpc:
+             self.discord_rpc.update_menu(len(songs))
+        
+        self.settings_manager = SettingsManager()
+        self.selected_song = songs[0]["path"] if songs else None
+        self.selected_song_metadata = songs[0] if songs else {} # Store full metadata
+        self.song_cards = {} # TRACK SONG CARDS
+        
+        # Signal Connections
+        self.download_finished_signal.connect(self._finish_yt_download)
+        self.download_progress_signal.connect(self._update_yt_progress)
+        
+        self.analysis_manager = None
+        # Image Manager (SAFE INIT)
+        self.image_manager = get_image_manager()
+        # Track Loading Request Counter
+        self.spotify_request_counter = 0
+        
+        if results:
+            print("DEBUG: Scheduling show_results...")
+            QTimer.singleShot(500, lambda: self.show_results(results))
+        
+        # Window Setup
+        self.setWindowTitle("Piano Tiles - Modern Menu")
+        self.resize(1100, 700)
+        self.setStyleSheet(styles.GLOBAL_STYLES)
+        
+        # Central Widget
+        central = QWidget()
+        self.setCentralWidget(central)
+        self.main_layout = QHBoxLayout(central)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        
+        # 1. Sidebar
+        self.init_sidebar()
+        
+        # 2. Content Stack
+        self.stack = QStackedWidget()
+        self.main_layout.addWidget(self.stack)
+        
+        # 3. Pages
+        self.init_play_page()
+        self.init_mods_page()
+        self.init_system_page()
+        self.init_spotify_page()
+        self.init_youtube_page()
+        
+        # Wire up
+        self.nav_musics.setChecked(True)
+        self.switch_page(0)
+        
+        # Initial Logic: Use the passed songs directly to avoid redundant scan
+        if self.songs:
+            self.populate_tabs(self.songs)
+            # Start Background Analysis
+            song_paths = [s["path"] for s in self.songs]
+            max_para = self.settings_manager.settings.get("max_parallel_analysis", 1)
+            self.analysis_manager = AnalysisManager(song_paths, max_threads=max_para)
+            self.analysis_manager.worker_progress.connect(self.on_analysis_progress)
+            self.analysis_manager.worker_finished.connect(self.on_analysis_step_finished)
+            self.analysis_manager.worker_diff_finished.connect(self.on_diff_finished)
+            
+            if self.selected_song:
+                self.select_song(self.selected_song)
+        else:
+            self.refresh_library()
+
+        # 4. Apply Initial Settings
+        mvol = self.settings_manager.settings.get("music_volume", 100)
+        svol = self.settings_manager.settings.get("sfx_volume", 100)
+        self.audio_manager.set_music_volume(mvol / 100.0)
+        self.audio_manager.set_sfx_volume(svol / 100.0)
+
+    def closeEvent(self, event):
+        """Cleanup threads on exit."""
+        if self.analysis_manager:
+            self.analysis_manager.stop()
+        if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
+            self.preview_thread.stop()
+            # Still using wait here? 
+            # On close, it's safer to just signal and let it finish.
+            # But we want to ensure it doesn't try to access widgets.
+            
+        if hasattr(self, 'game_analysis_thread') and isinstance(self.game_analysis_thread, QThread) and self.game_analysis_thread.isRunning():
+            self.game_analysis_thread.stop()
+        
+        event.accept()
+
+    def init_sidebar(self):
+        sidebar = QWidget()
+        sidebar.setFixedWidth(250)
+        sidebar.setStyleSheet(styles.SIDEBAR_STYLE)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(0, 40, 0, 20)
+        layout.setSpacing(10)
+        
+        # Title
+        title = QLabel("PIANO TILES")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {styles.COLOR_TEXT_PRIMARY}; margin-bottom: 40px;")
+        layout.addWidget(title)
+        
+        # Nav Buttons
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        
+        def create_nav_btn(text, idx):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda: self.switch_page(idx))
+            self.nav_group.addButton(btn)
+            layout.addWidget(btn)
+            return btn
+            
+        self.nav_musics = create_nav_btn("🎵  MUSICS", 0)
+        self.nav_mods = create_nav_btn("🛠️  MODIFIERS", 1)
+        self.nav_sys = create_nav_btn("⚙️  SYSTEM", 2)
+        self.nav_spotify_dl = create_nav_btn("🟢  SPOTIFY DL", 3)
+        self.nav_youtube_dl = create_nav_btn("🔴  YOUTUBE DL", 4)
+        
+        layout.addStretch()
+        
+        # Version
+        ver = QLabel("v2.0 Beta")
+        ver.setAlignment(Qt.AlignCenter)
+        ver.setStyleSheet("color: #555; font-size: 11px;")
+        layout.addWidget(ver)
+        
+        self.main_layout.addWidget(sidebar)
+
+    def switch_page(self, idx):
+        self.stack.setCurrentIndex(idx)
+
+    def init_play_page(self):
+        # Container for the Musics Page
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Header
+        header = QLabel("MUSIC LIBRARY")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {styles.COLOR_TEXT_PRIMARY}; margin: 20px;")
+        layout.addWidget(header)
+        
+        # Tabs
+        self.music_tabs = QTabWidget()
+        self.music_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 0; }
+            QTabBar::tab {
+                background: #222;
+                color: #AAA;
+                padding: 12px 40px;
+                min-width: 120px;
+                font-weight: bold;
+                font-size: 14px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #333;
+                color: white;
+                border-bottom: 2px solid #00F0FF;
+            }
+            QTabBar::tab:hover {
+                background: #2A2A2A;
+            }
+        """)
+        
+        # Tab 1: LOCALS
+        self.tab_locals = QWidget()
+        self.grid_locals = self.create_song_tab(self.tab_locals, "Local Files")
+        self.music_tabs.addTab(self.tab_locals, "LOCALS")
+        
+        # Tab 2: SPOTIFY (Downloads)
+        self.tab_spotify_dl = QWidget()
+        self.grid_spotify = self.create_song_tab(self.tab_spotify_dl, "Spotify Downloads")
+        self.music_tabs.addTab(self.tab_spotify_dl, "SPOTIFY")
+        
+        # Tab 3: YOUTUBE (Downloads)
+        self.tab_youtube_dl = QWidget()
+        self.grid_youtube = self.create_song_tab(self.tab_youtube_dl, "YouTube Downloads")
+        self.music_tabs.addTab(self.tab_youtube_dl, "YOUTUBE")
+        
+        layout.addWidget(self.music_tabs)
+        
+        # Common Bottom Controls (Difficulty + Start) - Shared across all tabs?
+        # Or should each tab have its own start?
+        # Shared is better for consistency.
+        
+        bottom_container = QWidget()
+        bottom = QHBoxLayout(bottom_container)
+        bottom.setContentsMargins(40, 20, 40, 20)
+        bottom.setSpacing(20)
+        
+        # Selected Song Display
+        self.lbl_selected = QLabel("Select a track")
+        self.lbl_selected.setStyleSheet("font-size: 16px; color: #AAA; font-weight: 500;")
+        
+        # Difficulty
+        self.diff_combo = QComboBox()
+        self.diff_combo.addItems(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"])
+        self.diff_combo.setCurrentText("Normal")
+        self.diff_combo.setFixedWidth(150)
+        self.diff_combo.setFixedHeight(45)
+        self.diff_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: #252525; border: 1px solid #444; border-radius: 8px;
+                padding: 10px; color: white; font-size: 14px;
+            }}
+            QComboBox::drop-down {{ border: none; }}
+            QComboBox QAbstractItemView {{
+                background-color: #252525;
+                color: white;
+                selection-background-color: #444;
+            }}
+        """)
+        
+        # Colorize items
+        from PyQt5.QtGui import QColor
+        for i, d in enumerate(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"]):
+            self.diff_combo.setItemData(i, QColor(styles.DIFFICULTY_COLORS[d]), Qt.ForegroundRole)
+            
+        self.diff_combo.currentIndexChanged.connect(self.sync_sliders_to_preset)
+        
+        # Start Button
+        self.btn_start = QPushButton("PLAY NOW  ►")
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.setFixedWidth(200)
+        self.btn_start.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        self.btn_start.clicked.connect(self.start_game)
+        
+        bottom.addWidget(self.lbl_selected)
+        bottom.addStretch()
+        bottom.addWidget(self.diff_combo)
+        bottom.addWidget(self.btn_start)
+        
+        layout.addWidget(bottom_container)
+        
+        # Integrated Progress Bar
+        self.prog_bar = QProgressBar()
+        self.prog_bar.setFixedHeight(4)
+        self.prog_bar.setTextVisible(False)
+        self.prog_bar.setStyleSheet(f"QProgressBar {{ background: #333; border: none; }} QProgressBar::chunk {{ background: {styles.COLOR_ACCENT}; }}")
+        layout.addWidget(self.prog_bar)
+        
+        self.stack.addWidget(container)
+
+    def create_song_tab(self, page, placeholder_text):
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 20, 20, 0)
+        layout.setSpacing(20)
+        
+        # Search Bar specific to this tab? 
+        # Or filters self.song_cards?
+        # If we have 3 grids, we need 3 lists of cards.
+        # Let's add a search bar here.
+        
+        search_bar = QLineEdit()
+        search_bar.setPlaceholderText(f"🔍  Search {placeholder_text}...")
+        search_bar.setStyleSheet(styles.INPUT_STYLE)
+        # We need to filter THIS grid.
+        # Defining a closure for filtering
+        
+        layout.addWidget(search_bar)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        content = QWidget()
+        grid = QVBoxLayout(content)
+        grid.setSpacing(10)
+        grid.addStretch()
+        
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        
+        # Store reference to grid for population
+        # Return layout to caller?
+        
+        # We need to hook up search.
+        # This requires storing the cards for THIS tab.
+        # Let's attach them to the layout object or page object.
+        page.cards = [] # List of (name, widget)
+        
+        def filter_tab(text):
+            text = text.lower().strip()
+            for name, widget in page.cards:
+                if text in name.lower():
+                    widget.setVisible(True)
+                else:
+                    widget.setVisible(False)
+                    
+        search_bar.textChanged.connect(filter_tab)
+        
+        return grid
+
+
+    def init_mods_page(self):
+        page = QWidget()
+        main_layout = QVBoxLayout(page)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+
+        # Scroll Area for Modifiers
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
+        
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(20)
+        layout.setAlignment(Qt.AlignTop)
+
+        lbl = QLabel("GAMEPLAY MODIFIERS")
+        lbl.setStyleSheet(f"font-size: 32px; font-weight: 900; color: {styles.COLOR_TEXT_PRIMARY}; margin-bottom: 20px;")
+        layout.addWidget(lbl)
+        
+        def create_slider(label_text, min_v, max_v, default_v, callback):
+            container = QWidget()
+            l = QVBoxLayout(container)
+            l.setSpacing(10)
+            
+            lbl = QLabel(f"{label_text}: {default_v}")
+            lbl.setStyleSheet("font-size: 16px; color: #CCC;")
+            
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(min_v, max_v)
+            slider.setValue(default_v)
+            slider.setStyleSheet(f"""
+                QSlider::groove:horizontal {{ height: 6px; background: #333; border-radius: 3px; }}
+                QSlider::handle:horizontal {{ background: {styles.COLOR_ACCENT}; width: 20px; height: 20px; margin: -7px 0; border-radius: 10px; }}
+            """)
+            
+            def update_lbl(val):
+                lbl.setText(f"{label_text}: {val}")
+                callback(val)
+                
+            slider.valueChanged.connect(update_lbl)
+            
+            l.addWidget(lbl)
+            l.addWidget(slider)
+            layout.addWidget(container)
+            return slider, lbl
+            
+        # Load saved mods
+        s_speed = self.settings_manager.settings.get("scroll_speed", 500)
+        s_chord = self.settings_manager.settings.get("chord_chance", 0)
+        s_hold = self.settings_manager.settings.get("hold_chance", 15)
+        s_smart = self.settings_manager.settings.get("smart_speed", False)
+
+        self.speed_slider, self.speed_label = create_slider("Scroll Speed", 300, 2500, s_speed, self.on_speed_changed)
+        self.chord_slider, self.chord_label = create_slider("Chord %", 0, 100, s_chord, self.on_chord_changed)
+        self.hold_slider, self.hold_label = create_slider("Hold %", 0, 100, s_hold, self.on_hold_changed)
+        
+        # Checkbox
+        self.chk_smart_speed = QCheckBox("Enable Smart Speed (Dynamic)")
+        self.chk_smart_speed.setChecked(s_smart)
+        self.chk_smart_speed.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_smart_speed.stateChanged.connect(self.on_smart_speed_changed)
+        layout.addWidget(self.chk_smart_speed)
+        
+        # New: Hidden Notes Modifier
+        s_hidden = self.settings_manager.settings.get("hidden_notes", False)
+        self.chk_hidden_notes = QCheckBox("Hidden Notes (Fade-out)")
+        self.chk_hidden_notes.setChecked(s_hidden)
+        self.chk_hidden_notes.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_hidden_notes.stateChanged.connect(self.on_hidden_notes_changed)
+        layout.addWidget(self.chk_hidden_notes)
+        
+        # New: Sudden Notes Modifier
+        s_sudden = self.settings_manager.settings.get("sudden_notes", False)
+        self.chk_sudden_notes = QCheckBox("Sudden Notes (Fade-in)")
+        self.chk_sudden_notes.setChecked(s_sudden)
+        self.chk_sudden_notes.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_sudden_notes.stateChanged.connect(self.on_sudden_notes_changed)
+        layout.addWidget(self.chk_sudden_notes)
+
+        # New: Flashlight Modifier
+        s_flashlight = self.settings_manager.settings.get("flashlight_mode", False)
+        self.chk_flashlight = QCheckBox("Flashlight Mode (Limited light)")
+        self.chk_flashlight.setChecked(s_flashlight)
+        self.chk_flashlight.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_flashlight.stateChanged.connect(self.on_flashlight_changed)
+        layout.addWidget(self.chk_flashlight)
+
+        # Funny Modifiers
+        layout.addSpacing(10)
+        lbl_funny = QLabel("FUNNY MODIFIERS")
+        lbl_funny.setStyleSheet("font-weight: bold; color: #888; margin-top: 10px;")
+        layout.addWidget(lbl_funny)
+
+        # Rainbow Road
+        s_rainbow = self.settings_manager.settings.get("rainbow_road", False)
+        self.chk_rainbow = QCheckBox("Rainbow Road (Color Cycle)")
+        self.chk_rainbow.setChecked(s_rainbow)
+        self.chk_rainbow.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_rainbow.stateChanged.connect(self.on_rainbow_changed)
+        layout.addWidget(self.chk_rainbow)
+
+        # Confetti Hit
+        s_confetti = self.settings_manager.settings.get("confetti_hit", False)
+        self.chk_confetti = QCheckBox("Confetti Hit (Visual Pop)")
+        self.chk_confetti.setChecked(s_confetti)
+        self.chk_confetti.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_confetti.stateChanged.connect(self.on_confetti_changed)
+        layout.addWidget(self.chk_confetti)
+
+        # Drunk Mode
+        s_drunk = self.settings_manager.settings.get("drunk_mode", False)
+        self.chk_drunk = QCheckBox("Drunk Mode (Screen Tilt)")
+        self.chk_drunk.setChecked(s_drunk)
+        self.chk_drunk.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_drunk.stateChanged.connect(self.on_drunk_changed)
+        layout.addWidget(self.chk_drunk)
+
+        # Giant Tiles
+        s_giant = self.settings_manager.settings.get("giant_tiles", False)
+        self.chk_giant = QCheckBox("Giant Tiles (Big Visuals)")
+        self.chk_giant.setChecked(s_giant)
+        self.chk_giant.setStyleSheet(f"QCheckBox {{ font-size: 16px; spacing: 10px; color: #DDD; }} QCheckBox::indicator {{ width: 22px; height: 22px; border: 1px solid #555; border-radius: 6px; }} QCheckBox::indicator:checked {{ background: {styles.COLOR_ACCENT}; }}")
+        self.chk_giant.stateChanged.connect(self.on_giant_changed)
+        layout.addWidget(self.chk_giant)
+
+        # Skin & Customization
+        layout.addSpacing(30)
+        lbl_skin = QLabel("VISUAL THEME")
+        lbl_skin.setStyleSheet("font-size: 14px; font-weight: bold; color: #666; letter-spacing: 2px;")
+        layout.addWidget(lbl_skin)
+
+        self.skin_combo = QComboBox()
+        self.skin_combo.addItems(["Neon", "Piano", "Minimal", "Toxic"])
+        self.skin_combo.setCurrentText(self.settings_manager.settings.get("selected_skin", "Neon"))
+        self.skin_combo.setStyleSheet("""
+            QComboBox { 
+                background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: white; min-width: 200px;
+            }
+            QComboBox::drop-down { border: none; }
+        """)
+        self.skin_combo.currentTextChanged.connect(self.on_skin_changed)
+        layout.addWidget(self.skin_combo)
+
+        s_bg = self.settings_manager.settings.get("custom_background", True)
+        self.chk_custom_bg = QCheckBox("Enable Custom Backgrounds (bg.jpg)")
+        self.chk_custom_bg.setChecked(s_bg)
+        self.chk_custom_bg.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: #888; }} QCheckBox::indicator {{ width: 18px; height: 18px; }}")
+        self.chk_custom_bg.stateChanged.connect(self.on_custom_bg_changed)
+        layout.addWidget(self.chk_custom_bg)
+        
+        layout.addStretch()
+        
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+        self.stack.addWidget(page)
+
+    def init_system_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(60, 60, 60, 60)
+        layout.setSpacing(40)
+        
+        title = QLabel("System Settings")
+        title.setStyleSheet("font-size: 28px; font-weight: bold;")
+        layout.addWidget(title)
+        
+        # Helper for System Sliders
+        def create_sys_slider(label_text, default_v, callback, min_v=0, max_v=100, is_percent=True):
+            container = QWidget()
+            l = QVBoxLayout(container)
+            l.setSpacing(10)
+            
+            suffix = "%" if is_percent else ""
+            lbl = QLabel(f"{label_text}: {default_v}{suffix}")
+            lbl.setStyleSheet("font-size: 16px; color: #CCC;")
+            
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(min_v, max_v)
+            slider.setValue(default_v)
+            slider.setStyleSheet(f"""
+                QSlider::groove:horizontal {{ height: 6px; background: #333; border-radius: 3px; }}
+                QSlider::handle:horizontal {{ background: {styles.COLOR_ACCENT}; width: 20px; height: 20px; margin: -7px 0; border-radius: 10px; }}
+            """)
+            
+            def update_lbl(val):
+                lbl.setText(f"{label_text}: {val}{suffix}")
+                callback(val)
+                
+            slider.valueChanged.connect(update_lbl)
+            
+            l.addWidget(lbl)
+            l.addWidget(slider)
+            layout.addWidget(container)
+            return slider
+            
+        # Music Volume
+        mvol = self.settings_manager.settings.get("music_volume", 100)
+        self.mvol_slider = create_sys_slider("Music Volume", mvol, self.on_mvol_changed)
+        
+        # SFX Volume
+        svol = self.settings_manager.settings.get("sfx_volume", 100)
+        self.svol_slider = create_sys_slider("SFX Volume", svol, self.on_svol_changed)
+        
+        # Parallel Analysis Tasks
+        max_para = self.settings_manager.settings.get("max_parallel_analysis", 1)
+        self.para_slider = create_sys_slider("Parallel Analysis Tasks", max_para, self.on_para_changed, min_v=1, max_v=7, is_percent=False)
+        
+        # Library Manager
+        btn_lib = QPushButton("📂  Manage Music Library")
+        btn_lib.setFixedWidth(300)
+        btn_lib.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        btn_lib.clicked.connect(self.open_library_manager)
+        layout.addWidget(btn_lib)
+        
+        layout.addStretch()
+        self.stack.addWidget(page)
+
+    # --- Reverting init_locals_tab is not needed as init_play_page now does it all --- 
+    # But clean up the method if unused. For now, let's just make ensure init_spotify/youtube are pages again.
+
+    def init_spotify_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        
+        # Header
+        header = QLabel("Spotify Downloader")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #1DB954;")
+        layout.addWidget(header)
+        
+        self.spotify_service = SpotifyService()
+        
+        # Connect Button (Initial State)
+        self.spotify_login_btn = QPushButton("Connect with Spotify")
+        self.spotify_login_btn.setFixedSize(200, 50)
+        self.spotify_login_btn.setCursor(Qt.PointingHandCursor)
+        self.spotify_login_btn.setStyleSheet("background-color: #1DB954; color: white; border-radius: 25px; font-weight: bold;")
+        self.spotify_login_btn.clicked.connect(self.login_spotify)
+        layout.addWidget(self.spotify_login_btn, alignment=Qt.AlignCenter)
+        
+        # Content Area (Hidden until login)
+        self.spotify_content = QWidget()
+        self.spotify_content.setVisible(False)
+        content_layout = QVBoxLayout(self.spotify_content)
+        content_layout.setContentsMargins(0,0,0,0)
+        
+        # Playlists Combo
+        p_layout = QHBoxLayout()
+        pk_l = QVBoxLayout()
+        pk_l.addWidget(QLabel("Select Playlist:"))
+        self.playlist_combo = QComboBox()
+        self.playlist_combo.setStyleSheet(styles.INPUT_STYLE)
+        self.playlist_combo.currentIndexChanged.connect(self.load_spotify_tracks_from_combo)
+        pk_l.addWidget(self.playlist_combo)
+        p_layout.addLayout(pk_l, stretch=2)
+        
+        # Difficulty for Spotify
+        df_l = QVBoxLayout()
+        df_l.addWidget(QLabel("Game Difficulty:"))
+        self.spotify_diff_combo = QComboBox()
+        self.spotify_diff_combo.addItems(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"])
+        self.spotify_diff_combo.setCurrentText(self.diff_combo.currentText())
+        self.spotify_diff_combo.setFixedHeight(45)
+        self.spotify_diff_combo.setStyleSheet(self.diff_combo.styleSheet())
+        
+        # Sync them
+        self.spotify_diff_combo.currentTextChanged.connect(self.diff_combo.setCurrentText)
+        self.diff_combo.currentTextChanged.connect(self.spotify_diff_combo.setCurrentText)
+        
+        for i, d in enumerate(["Easy", "Normal", "Hard", "Insane", "Impossible", "God", "Beyond"]):
+            from PyQt5.QtGui import QColor
+            self.spotify_diff_combo.setItemData(i, QColor(styles.DIFFICULTY_COLORS[d]), Qt.ForegroundRole)
+            
+        df_l.addWidget(self.spotify_diff_combo)
+        p_layout.addLayout(df_l, stretch=1)
+        
+        content_layout.addLayout(p_layout)
+        
+        # Tracks List
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        tracks_widget = QWidget()
+        self.spotify_tracks_layout = QVBoxLayout(tracks_widget)
+        self.spotify_tracks_layout.setSpacing(10)
+        self.spotify_tracks_layout.addStretch()
+        
+        scroll.setWidget(tracks_widget)
+        content_layout.addWidget(scroll)
+
+        # Playlist Controls
+        playlist_controls = QHBoxLayout()
+        playlist_controls.setContentsMargins(40, 10, 40, 20)
+        
+        self.btn_download_playlist = QPushButton("📥  DOWNLOAD PLAYLIST")
+        self.btn_download_playlist.setFixedHeight(50)
+        self.btn_download_playlist.setStyleSheet(styles.BUTTON_PRIMARY_STYLE.replace(styles.COLOR_ACCENT, "#333").replace("#000", "#FFF"))
+        self.btn_download_playlist.clicked.connect(self.download_entire_playlist)
+        
+        self.btn_play_playlist = QPushButton("🎮  PLAY ALL SHUFFLE")
+        self.btn_play_playlist.setFixedHeight(50)
+        self.btn_play_playlist.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        self.btn_play_playlist.clicked.connect(self.play_entire_playlist)
+        
+        playlist_controls.addWidget(self.btn_download_playlist)
+        playlist_controls.addWidget(self.btn_play_playlist)
+        content_layout.addLayout(playlist_controls)
+        
+        layout.addWidget(self.spotify_content)
+        self.stack.addWidget(page)
+
+    def init_youtube_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+        
+        # Header
+        header = QLabel("YouTube Downloader")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000;")
+        layout.addWidget(header)
+        
+        self.youtube_service = YouTubeService()
+        
+        # Search Bar
+        search_layout = QHBoxLayout()
+        self.yt_search_input = QLineEdit()
+        self.yt_search_input.setPlaceholderText("Search YouTube...")
+        self.yt_search_input.setStyleSheet(styles.INPUT_STYLE)
+        self.yt_search_input.returnPressed.connect(self.search_youtube)
+        
+        btn_search = QPushButton("Search")
+        btn_search.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        btn_search.clicked.connect(self.search_youtube)
+        
+        search_layout.addWidget(self.yt_search_input)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+        
+        # Results Area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        self.yt_results_widget = QWidget()
+        self.yt_results_layout = QVBoxLayout(self.yt_results_widget)
+        self.yt_results_layout.setSpacing(15)
+        self.yt_results_layout.addStretch()
+        
+        scroll.setWidget(self.yt_results_widget)
+        layout.addWidget(scroll)
+        
+        # Status Label
+        self.yt_status = QLabel("")
+        self.yt_status.setStyleSheet("color: #AAA; font-style: italic;")
+        layout.addWidget(self.yt_status)
+        
+        # Download Progress
+        self.yt_progress = QProgressBar()
+        self.yt_progress.setTextVisible(False)
+        self.yt_progress.setFixedHeight(6)
+        self.yt_progress.setStyleSheet(f"QProgressBar {{ background: #333; border: none; border-radius: 3px; }} QProgressBar::chunk {{ background: {styles.COLOR_ACCENT}; border-radius: 3px; }}")
+        self.yt_progress.setValue(0)
+        self.yt_progress.setVisible(False)
+        layout.addWidget(self.yt_progress)
+        
+        self.stack.addWidget(page)
+
+    def login_spotify(self):
+        self.spotify_login_btn.setText("Connecting...")
+        self.spotify_login_btn.setEnabled(False)
+        
+        # Using a thread to prevent freezing during Browser/API dance
+        self.login_thread = SpotifyLoginThread(self.spotify_service)
+        self.login_thread.finished.connect(self.on_spotify_login_done)
+        self.login_thread.start()
+
+    def on_spotify_login_done(self, success, playlists):
+        if success:
+            self.spotify_login_btn.setVisible(False)
+            self.spotify_content.setVisible(True)
+            self.load_spotify_playlists_data(playlists)
+        else:
+            self.spotify_login_btn.setText("Connection Failed")
+            self.spotify_login_btn.setEnabled(True)
+            QMessageBox.critical(self, "Spotify Error", "Não foi possível conectar. Verifique seu navegador ou o arquivo .env!")
+
+    def load_spotify_playlists_data(self, playlists):
+        self.playlist_combo.clear()
+        self.spotify_playlists_data = playlists
+        for p in playlists:
+            self.playlist_combo.addItem(f"{p['name']} ({p['tracks_total']} tracks)", p['id'])
+        
+        if playlists:
+            self.load_spotify_tracks_from_combo(0)
+
+    def load_spotify_tracks_from_combo(self, idx):
+        if idx < 0: return
+        playlist_id = self.spotify_combo_data(idx)
+        if not playlist_id: return
+        
+        self.spotify_request_counter += 1
+        req_id = self.spotify_request_counter
+        
+        # Clear tracks and show loading
+        while self.spotify_tracks_layout.count():
+            item = self.spotify_tracks_layout.takeAt(0)
+            if item.widget(): 
+                item.widget().deleteLater()
+            
+        loading_lbl = QLabel("⌛  Loading tracks...")
+        loading_lbl.setStyleSheet("color: #AAA; font-size: 14px; margin: 20px;")
+        loading_lbl.setAlignment(Qt.AlignCenter)
+        self.spotify_tracks_layout.insertWidget(0, loading_lbl)
+        
+        # Async Load
+        self.tracks_thread = SpotifyTracksThread(self.spotify_service, playlist_id, req_id)
+        self.tracks_thread.finished.connect(lambda tracks, rid: self.on_spotify_tracks_loaded(tracks, rid, loading_lbl))
+        self.tracks_thread.start()
+
+    def on_spotify_tracks_loaded(self, tracks, request_id, loading_lbl):
+        if request_id != self.spotify_request_counter: return
+            
+        try: loading_lbl.deleteLater()
+        except: pass
+        
+        self.current_spotify_tracks = tracks
+        self._tracks_to_add = list(tracks)
+        self._add_track_batch(request_id)
+
+    def _add_track_batch(self, rid):
+        # Safety: If user switched, stop current batching
+        if rid != self.spotify_request_counter: return
+        
+        batch_size = 3
+        for _ in range(batch_size):
+            if not self._tracks_to_add: return
+            t = self._tracks_to_add.pop(0)
+            
+            card = SpotifyTrackCard(t, is_downloaded=t.get('is_downloaded', False))
+            card.btn_dl.clicked.connect(lambda _, track=t, c=card: self.download_spotify_track(track, c.btn_dl))
+            
+            if t['preview_url']:
+                card.btn_preview.clicked.connect(lambda _, url=t['preview_url']: self.play_spotify_preview(url))
+            
+            self.spotify_tracks_layout.insertWidget(self.spotify_tracks_layout.count()-1, card)
+            
+            # Async Image Load using Native Qt Manager
+            if t['image']:
+                self.image_manager.load(t['image'], card)
+        
+        QTimer.singleShot(50, lambda: self._add_track_batch(rid))
+
+    def download_spotify_track(self, track, button=None):
+        if button:
+            button.setText("⏳")
+            button.setEnabled(False)
+            
+        def _on_done(file_path):
+            if "ERROR" in file_path:
+                if button: 
+                    button.setText("❌")
+                    button.setEnabled(True)
+                return
+            
+            # Move to spotify folder
+            spotify_dir = os.path.join("assets", "music", "spotify")
+            if not os.path.exists(spotify_dir): os.makedirs(spotify_dir)
+            
+            safe_name = "".join([c for c in f"{track['artist']} - {track['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+            final_dest = os.path.join(spotify_dir, f"{safe_name}.mp3")
+            
+            try:
+                import shutil
+                shutil.move(file_path, final_dest)
+                if button: button.setText("✅")
+                # Refresh UI or just notify
+            except:
+                if button: button.setText("??")
+
+        # Search on YouTube
+        query = f"{track['artist']} - {track['name']} audio"
+        results = self.youtube_service.search(query, limit=1)
+        if results:
+            self.youtube_service.download_audio(results[0]['id'], callback=_on_done)
+        else:
+            if button: button.setText("N/A")
+
+    def download_entire_playlist(self):
+        if not hasattr(self, 'current_spotify_tracks'): return
+        self.btn_download_playlist.setText("📥 Downloading List...")
+        self.btn_download_playlist.setEnabled(False)
+        
+        def _worker():
+            tracks_to_dl = []
+            for t in self.current_spotify_tracks:
+                safe_name = "".join([c for c in f"{t['artist']} - {t['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+                path = os.path.join("assets", "music", "spotify", f"{safe_name}.mp3")
+                if not os.path.exists(path):
+                    tracks_to_dl.append(t)
+            
+            total = len(tracks_to_dl)
+            for i, track in enumerate(tracks_to_dl):
+                self.btn_download_playlist.setText(f"📥 DL: {i+1}/{total}")
+                self.download_spotify_track(track)
+                import time
+                time.sleep(1.5)
+            
+            self.btn_download_playlist.setText("📥 Download All")
+            self.btn_download_playlist.setEnabled(True)
+            
+        import threading
+        threading.Thread(target=_worker).start()
+
+
+    def play_entire_playlist(self):
+        if not hasattr(self, 'current_spotify_tracks'): return
+        
+        import random
+        play_list = []
+        for t in self.current_spotify_tracks:
+            # More robust name cleaning to match download_spotify_track
+            safe_name = "".join([c for c in f"{t['artist']} - {t['name']}" if c.isalnum() or c in (' ', '-', '_')]).strip()
+            path = os.path.normpath(os.path.join("assets", "music", "spotify", f"{safe_name}.mp3"))
+            
+            if os.path.exists(path):
+                play_list.append(path)
+                # Ensure it's in our library so run.py can find metadata
+                if not any(os.path.normpath(s["path"]) == path for s in self.songs):
+                    self.songs.append({
+                        "path": path,
+                        "title": t["name"],
+                        "artist": t["artist"],
+                        "image": t["image"]
+                    })
+            else:
+                print(f"DEBUG Playlist: Missing {path}")
+        
+        if not play_list:
+            QMessageBox.warning(self, "No Songs", "Nenhuma música da playlist foi encontrada na pasta spotify. Verifique se os downloads foram concluídos!")
+            return
+            
+        # Shuffle!
+        random.shuffle(play_list)
+        print(f"DEBUG: Starting playlist with {len(play_list)} songs shuffled.")
+            
+        diff = self.diff_combo.currentText()
+        custom = {
+            "scroll_speed": self.speed_slider.value(),
+            "chord_chance": self.chord_slider.value(),
+            "hold_chance": self.hold_slider.value(),
+            "smart_speed": self.chk_smart_speed.isChecked(),
+            "hidden_notes": self.chk_hidden_notes.isChecked(),
+            "sudden_notes": self.chk_sudden_notes.isChecked(),
+            "flashlight_mode": self.chk_flashlight.isChecked(),
+            "rainbow_road": self.chk_rainbow.isChecked(),
+            "confetti_hit": self.chk_confetti.isChecked(),
+            "drunk_mode": self.chk_drunk.isChecked(),
+            "giant_tiles": self.chk_giant.isChecked(),
+            "selected_skin": self.skin_combo.currentText()
+        }
+        
+        # We don't have beats pre-calculated for all, but run.py can handle that
+        self.playlist_ready.emit(play_list, diff, custom)
+
+    def spotify_combo_data(self, idx):
+        if 0 <= idx < len(self.spotify_playlists_data):
+            return self.spotify_playlists_data[idx]['id']
+        return None
+
+    def play_spotify_preview(self, url):
+        print(f"Playing Preview: {url}")
+        import webbrowser
+        webbrowser.open(url)
+
+    def init_youtube_tab(self, page):
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+        
+        # Header
+        header = QLabel("YouTube Downloads")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000;")
+        layout.addWidget(header)
+        
+        self.youtube_service = YouTubeService()
+        
+        # Search Bar
+        search_layout = QHBoxLayout()
+        self.yt_search_input = QLineEdit()
+        self.yt_search_input.setPlaceholderText("Search YouTube...")
+        self.yt_search_input.setStyleSheet(styles.INPUT_STYLE)
+        self.yt_search_input.returnPressed.connect(self.search_youtube)
+        
+        btn_search = QPushButton("Search")
+        btn_search.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+        btn_search.clicked.connect(self.search_youtube)
+        
+        search_layout.addWidget(self.yt_search_input)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+        
+        # Results Area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        
+        self.yt_results_widget = QWidget()
+        self.yt_results_layout = QVBoxLayout(self.yt_results_widget)
+        self.yt_results_layout.setSpacing(15)
+        self.yt_results_layout.addStretch()
+        
+        scroll.setWidget(self.yt_results_widget)
+        layout.addWidget(scroll)
+        
+        # Status Label
+        self.yt_status = QLabel("")
+        self.yt_status.setStyleSheet("color: #AAA; font-style: italic;")
+        layout.addWidget(self.yt_status)
+
+    def search_youtube(self):
+        query = self.yt_search_input.text().strip()
+        if not query: return
+        
+        self.yt_status.setText("Searching...")
+        self.yt_search_input.setEnabled(False)
+        
+        # Thread search
+        import threading
+        def _search():
+            results = self.youtube_service.search(query)
+            # We need to signal back to UI thread. 
+            # For simplicity in this edit, we'll assume a method to update UI exists or use QTimer hacks if needed.
+            # But here we can use QMetaObject.invokeMethod if we had slot, or just QTimer.singleShot(0, ...)
+            # Let's try to update self.latest_yt_results and trigger update via QTimer
+            self.latest_yt_results = results
+            # Trigger update on main thread? 
+            # Actually, let's just do sync search for now to avoid crashing with threading issues if not handled perfectly.
+            # It will freeze UI for a second but is safer for this specific edit context.
+            pass
+
+        # Doing SYNC search for stability in this prompt context
+        try:
+             results = self.youtube_service.search(query)
+             self.display_youtube_results(results)
+             self.yt_status.setText(f"Found {len(results)} results.")
+        except Exception as e:
+             self.yt_status.setText(f"Error: {e}")
+        
+        self.yt_search_input.setEnabled(True)
+
+    def display_youtube_results(self, results):
+        # Clear previous
+        while self.yt_results_layout.count():
+            c = self.yt_results_layout.takeAt(0)
+            if c.widget(): c.widget().deleteLater()
+            
+        for vid in results:
+            card = QFrame()
+            card.setStyleSheet("background: #222; border-radius: 8px; padding: 10px;")
+            card.setMinimumHeight(100) # Allow expansion
+            
+            h = QHBoxLayout(card)
+            h.setContentsMargins(5,5,5,5)
+            h.setSpacing(15)
+            
+            # Thumbnail Button (Clickable)
+            btn_thumb = QPushButton()
+            btn_thumb.setFixedSize(120, 70) 
+            btn_thumb.setCursor(Qt.PointingHandCursor)
+            btn_thumb.setStyleSheet("background-color: #000; border: none; border-radius: 4px;")
+            btn_thumb.clicked.connect(lambda _, vid_id=vid['id'], title=vid['title']: self.download_and_play_youtube(vid_id, title))
+            
+            # Async Thumb Loading
+            try:
+                from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
+                from PyQt5.QtCore import QUrl
+                
+                # We need a persistent manager or keep reference
+                if not hasattr(self, '_nam'): self._nam = QNetworkAccessManager()
+                
+                def on_thumb_loaded(reply, btn_ref):
+                    try:
+                        if reply.error() != reply.NoError:
+                            print(f"Thumb Network Error: {reply.errorString()}")
+                            reply.deleteLater()
+                            return
+                        
+                        pixmap = QPixmap()
+                        pixmap.loadFromData(reply.readAll())
+                        if not pixmap.isNull():
+                            # Scale to btn size
+                            icon = QIcon(pixmap.scaled(120, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                            btn_ref.setIcon(icon)
+                            btn_ref.setIconSize(btn_ref.size())
+                        else:
+                            print(f"Thumb Error: Pixmap is null for url {reply.url().toString()}")
+                    except Exception as e:
+                        print(f"Thumb Load Exception: {e}")
+                    finally:
+                        reply.deleteLater()
+
+                req = QNetworkRequest(QUrl(vid['thumbnail']))
+                req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
+                req.setHeader(QNetworkRequest.UserAgentHeader, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                
+                reply = self._nam.get(req)
+                # Pass btn_thumb explicitly to avoid closure issues
+                reply.finished.connect(lambda r=reply, b=btn_thumb: on_thumb_loaded(r, b))
+            except Exception as e:
+                print(f"Network Image Error: {e}")
+                btn_thumb.setText("▶") # Fallback
+                
+            h.addWidget(btn_thumb)
+            
+            # Text Info
+            v = QVBoxLayout()
+            v.setSpacing(5)
+            
+            title = QLabel(vid['title'])
+            title.setStyleSheet("color: white; font-weight: bold; font-size: 14px;")
+            title.setWordWrap(True) 
+            title.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            # Ensure it expands
+            title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+            
+            uploader = QLabel(f"{vid['uploader']} • {vid['duration']}s")
+            uploader.setStyleSheet("color: #AAA; font-size: 12px;")
+            uploader.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            
+            v.addWidget(title)
+            v.addWidget(uploader)
+            v.addStretch()
+            h.addLayout(v, stretch=1) # Give text more space
+            
+            # Play Button
+            btn_dl = QPushButton("PLAY")
+            btn_dl.setFixedSize(80, 40)
+            btn_dl.setStyleSheet(styles.BUTTON_PRIMARY_STYLE)
+            btn_dl.setCursor(Qt.PointingHandCursor)
+            btn_dl.clicked.connect(lambda _, vid_id=vid['id'], title=vid['title']: self.download_and_play_youtube(vid_id, title))
+            h.addWidget(btn_dl)
+            
+            self.yt_results_layout.insertWidget(self.yt_results_layout.count()-1, card)
+
+    def download_and_play_youtube(self, video_id, title):
+        self.yt_status.setText(f"Downloading '{title}'... Please wait.")
+        self.yt_progress.setVisible(True)
+        self.yt_progress.setValue(0)
+        
+        # Use signals for thread safety
+        def update_prog(val):
+            # Emit signal from background thread (safe in PyQt)
+            self.download_progress_signal.emit(float(val))
+            
+        def on_done(file_path):
+            # Emit signal
+            self.download_finished_signal.emit(str(file_path) if file_path else "", title)
+            
+        self.youtube_service.download_audio(video_id, on_done, progress_callback=update_prog)
+
+    def _update_yt_progress(self, val):
+        self.yt_progress.setValue(int(val))
+
+    def _finish_yt_download(self, file_path, title):
+        print(f"DEBUG: _finish_yt_download called with path={file_path}")
+        # Update progress to 100% just in case
+        self.yt_progress.setValue(100)
+        
+        # Hide after a delay so user sees completion
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(1500, lambda: self.yt_progress.setVisible(False))
+        
+        # self.stack.setEnabled(True)
+        if file_path and not str(file_path).startswith("ERROR:") and os.path.exists(file_path):
+            self.yt_status.setText(f"Downloaded: {title}")
+            
+            # Refresh ONLY the youtube folder to avoid stutter
+            youtube_path = os.path.join("assets", "music", "youtube")
+            self.refresh_library(folder_to_scan=youtube_path)
+            
+            # Select the new song
+            self.select_song(file_path)
+            
+            # Switch to "Musics" page (index 0) and "YouTube" tab (index 2)
+            self.nav_musics.setChecked(True)
+            self.switch_page(0)
+            self.music_tabs.setCurrentIndex(2) # 0=Locals, 1=Spotify, 2=YouTube
+            
+            # Scroll to it? (Hard with current layout, but selection highlights it)
+            
+            # Notify user via status or popup?
+            # For now, just switching to library is enough "Play on the spot" enabler
+            # If they want IMMEDIATE play, we could still auto-start, but user said 
+            # "add a play button to play on the spot", implying maybe a choice?
+            # But earlier they said "loop downloading". Let's stick to showing it in library.
+            
+        else:
+            if str(file_path).startswith("ERROR:"):
+                # Extract actual msg
+                msg = str(file_path).replace("ERROR:", "").strip()
+                self.yt_status.setText(f"Download error: {msg}")
+            else:
+                self.yt_status.setText("Download failed. Check implementation.")
+
+    # --- Logic Methods (Copied/Adapted from MenuQt) ---
+    
+    def filter_songs(self, text):
+        text = text.lower().strip()
+        for song, card in self.song_cards.items():
+            name = os.path.basename(song).lower()
+            if text in name:
+                card.setVisible(True)
+            else:
+                card.setVisible(False)
+
+    def select_song(self, song_path):
+        self.selected_song = song_path
+        # Find the full song metadata
+        self.selected_song_metadata = next((s for s in self.songs if s["path"] == song_path), {})
+        name = os.path.splitext(os.path.basename(song_path))[0]
+        self.lbl_selected.setText(name.upper())
+        self.lbl_selected.setStyleSheet(f"font-size: 18px; color: {styles.COLOR_ACCENT}; font-weight: bold;")
+        
+        # Preview Logic: Use safe stop
+        if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
+            self.preview_thread.stop()
+            # DON'T wait on main thread, let it die in background
+            
+        self.preview_thread = AnalysisThread(song_path, "Normal")
+        self.preview_thread.finished.connect(self.start_preview)
+        self.preview_thread.start()
+
+    def start_preview(self, result):
+        if isinstance(result, dict):
+            start = result.get("preview_start", 0)
+            self.audio_manager.play_preview(self.selected_song, start)
+
+    def start_game(self):
+        if not self.selected_song: return
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("ANALYZING...")
+        
+        # 1. IMMEDIATE INTERRUPTION: Stop background analysis
+        if self.analysis_manager:
+            self.analysis_manager.stop()
+            
+        # 2. IMMEDIATE INTERRUPTION: Cancel any active YouTube download
+        if hasattr(self, 'youtube_service'):
+            self.youtube_service.stop_download = True
+            self.yt_status.setText("Download cancelled (Game Start)")
+            self.yt_progress.setVisible(False)
+
+        # 3. Stop preview before starting game analysis
+        if hasattr(self, 'preview_thread') and self.preview_thread and self.preview_thread.isRunning():
+            self.preview_thread.stop()
+            # Again, don't wait, let it finish naturally
+
+        self.game_analysis_thread = AnalysisThread(self.selected_song, self.diff_combo.currentText())
+        self.game_analysis_thread.progress.connect(lambda v, m: self.prog_bar.setValue(int(v)))
+        self.game_analysis_thread.finished.connect(self.on_analysis_finished)
+        self.game_analysis_thread.start()
+
+    def on_analysis_finished(self, result):
+        beats = result.get("beats", []) if isinstance(result, dict) else result
+        custom = {
+            "speed": self.speed_slider.value(),
+            "chord_chance": self.chord_slider.value() / 100.0,
+            "hold_chance": self.hold_slider.value() / 100.0,
+            "smart_speed": self.chk_smart_speed.isChecked(),
+            "hidden_notes": self.chk_hidden_notes.isChecked(),
+            "sudden_notes": self.chk_sudden_notes.isChecked(),
+            "flashlight_mode": self.chk_flashlight.isChecked(),
+            "rainbow_road": self.chk_rainbow.isChecked(),
+            "confetti_hit": self.chk_confetti.isChecked(),
+            "drunk_mode": self.chk_drunk.isChecked(),
+            "giant_tiles": self.chk_giant.isChecked(),
+            "energy_profile": result.get("energy_profile", []) if isinstance(result, dict) else [],
+            "selected_skin": self.skin_combo.currentText(),
+            "custom_background": self.chk_custom_bg.isChecked()
+        }
+        self.song_ready.emit(self.selected_song, self.diff_combo.currentText(), beats, custom, self.selected_song_metadata)
+        
+    def open_library_manager(self):
+        from src.ui.library_dialog import MusicLibraryDialog 
+        dlg = MusicLibraryDialog(self.settings_manager, self)
+        if dlg.exec_():
+             self.refresh_library()
+
+    def refresh_library(self, folder_to_scan=None):
+        if folder_to_scan:
+            # Incremental refresh
+            print(f"DEBUG: Incremental refresh for {folder_to_scan}")
+            new_songs = self.audio_manager.scan_library([folder_to_scan])
+            
+            # Filter what we already have
+            actually_new = []
+            seen = {os.path.normpath(s["path"]).lower() for s in self.songs}
+            for s in new_songs:
+                if os.path.normpath(s["path"]).lower() not in seen:
+                    actually_new.append(s)
+            
+            if actually_new:
+                print(f"DEBUG: Found {len(actually_new)} NEW songs.")
+                self.songs.extend(actually_new)
+                self.add_songs_to_ui(actually_new)
+                
+                # Add to background analysis queue
+                if self.analysis_manager:
+                    actually_new_paths = [s["path"] for s in actually_new]
+                    self.analysis_manager.add_songs(actually_new_paths)
+            return
+
+        # Re-scan all configured folders plus our assets/music structure
+        folders = self.settings_manager.get_music_folders()
+        folders.append("assets/music")
+        folders.append(os.path.join("assets", "music", "youtube"))
+        folders.append(os.path.join("assets", "music", "spotify"))
+        
+        print(f"DEBUG: Refreshing library from {folders}")
+        self.songs = self.audio_manager.scan_library(folders)
+        print(f"DEBUG: Scanned {len(self.songs)} songs.")
+        self.populate_tabs(self.songs)
+        
+        # Start Background Analysis
+        if self.analysis_manager:
+            self.analysis_manager.stop()
+            
+        song_paths = [s["path"] for s in self.songs]
+        max_para = self.settings_manager.settings.get("max_parallel_analysis", 1)
+        self.analysis_manager = AnalysisManager(song_paths, max_threads=max_para)
+        self.analysis_manager.worker_progress.connect(self.on_analysis_progress)
+        self.analysis_manager.worker_finished.connect(self.on_analysis_step_finished)
+        self.analysis_manager.worker_diff_finished.connect(self.on_diff_finished)
+        
+    def on_analysis_progress(self, song_path, val):
+        if song_path in self.song_cards:
+            self.song_cards[song_path].set_analysis_progress(val)
+        else:
+            # Fallback for path mismatch (e.g. forward/back slashes)
+            norm_path = os.path.normpath(song_path)
+            for k, card in self.song_cards.items():
+                if os.path.normpath(k) == norm_path:
+                    card.set_analysis_progress(val)
+                    return
+            print(f"DEBUG: Could not find card for {song_path}")
+        
+    def on_analysis_step_finished(self, song_path):
+        if song_path in self.song_cards:
+            self.song_cards[song_path].set_analysis_progress(-1)
+        else:
+            norm_path = os.path.normpath(song_path)
+            for k, card in self.song_cards.items():
+                if os.path.normpath(k) == norm_path:
+                    card.set_analysis_progress(-1)
+                    return
+
+    def on_diff_finished(self, song_path, difficulty):
+        # Update the stripes on the card
+        if song_path in self.song_cards:
+            card = self.song_cards[song_path]
+            if difficulty not in card.cached_diffs:
+                card.update_cached_diffs(card.cached_diffs + [difficulty])
+        else:
+            norm_path = os.path.normpath(song_path)
+            for k, card in self.song_cards.items():
+                if os.path.normpath(k) == norm_path:
+                    if difficulty not in card.cached_diffs:
+                        card.update_cached_diffs(card.cached_diffs + [difficulty])
+                    return
+        
+    def on_all_analysis_finished(self):
+        pass
+
+    def populate_tabs(self, songs):
+        print(f"DEBUG: Populating tabs with {len(songs)} songs...")
+        # Clear existing
+        def clear_layout(layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+        
+        clear_layout(self.grid_locals)
+        clear_layout(self.grid_spotify)
+        clear_layout(self.grid_youtube)
+        
+        self.tab_locals.cards = []
+        self.tab_spotify_dl.cards = []
+        self.tab_youtube_dl.cards = []
+        
+        # Populate
+        self.song_cards = {} # Reset map
+        for song_data in songs:
+            card = ModernSongCard(song_data)
+            card.clicked.connect(self.select_song)
+            self.song_cards[song_data["path"]] = card
+            
+            norm = os.path.normpath(song_data["path"]).lower() 
+            name = os.path.basename(song_data["path"])
+            
+            # Simple heuristic based on path
+            if "youtube" in norm:
+                self.grid_youtube.addWidget(card)
+                self.tab_youtube_dl.cards.append((name, card))
+            elif "spotify" in norm:
+                self.grid_spotify.addWidget(card)
+                self.tab_spotify_dl.cards.append((name, card))
+            else:
+                self.grid_locals.addWidget(card)
+                self.tab_locals.cards.append((name, card)) # Everything else is local
+                
+        # Add stretches
+        self.grid_locals.addStretch()
+        self.grid_spotify.addStretch()
+        self.grid_youtube.addStretch()
+
+    def add_songs_to_ui(self, songs):
+        """Incrementally adds cards to the UI without a full clear."""
+        for song_data in songs:
+            if song_data["path"] in self.song_cards: continue
+            
+            card = ModernSongCard(song_data)
+            card.clicked.connect(self.select_song)
+            self.song_cards[song_data["path"]] = card
+            
+            norm = os.path.normpath(song_data["path"]).lower()
+            name = os.path.basename(song_data["path"])
+            
+            # Removestretch temporarily? No, layouts often have stretch at end.
+            # Grid layouts in this app are actually QVBoxLayout with addWidget.
+            # But the 'grid' variables are QVBoxLayouts.
+            
+            if "youtube" in norm:
+                # Insert BEFORE the stretch
+                self.grid_youtube.insertWidget(self.grid_youtube.count()-1, card)
+                self.tab_youtube_dl.cards.append((name, card))
+            elif "spotify" in norm:
+                self.grid_spotify.insertWidget(self.grid_spotify.count()-1, card)
+                self.tab_spotify_dl.cards.append((name, card))
+            else:
+                self.grid_locals.insertWidget(self.grid_locals.count()-1, card)
+                self.tab_locals.cards.append((name, card))
+
+    # Sliders logic
+    def on_speed_changed(self, v): 
+        self.settings_manager.settings["scroll_speed"] = v
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_chord_changed(self, v):
+        self.chord_label.setText(f"Chord %: {v}")
+        self.settings_manager.settings["chord_chance"] = v
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_hold_changed(self, v):
+        self.hold_label.setText(f"Hold %: {v}")
+        self.settings_manager.settings["hold_chance"] = v
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_smart_speed_changed(self, state):
+        self.settings_manager.settings["smart_speed"] = (state == Qt.Checked)
+        self.settings_manager.save()
+        self.update_stars()
+
+    def on_hidden_notes_changed(self, state):
+        self.settings_manager.settings["hidden_notes"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_sudden_notes_changed(self, state):
+        self.settings_manager.settings["sudden_notes"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_flashlight_changed(self, state):
+        self.settings_manager.settings["flashlight_mode"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_rainbow_changed(self, state):
+        self.settings_manager.settings["rainbow_road"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_skin_changed(self, skin_name):
+        self.settings_manager.settings["selected_skin"] = skin_name
+        self.settings_manager.save()
+
+    def on_custom_bg_changed(self, state):
+        self.settings_manager.settings["custom_background"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_confetti_changed(self, state):
+        self.settings_manager.settings["confetti_hit"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_drunk_changed(self, state):
+        self.settings_manager.settings["drunk_mode"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_giant_changed(self, state):
+        self.settings_manager.settings["giant_tiles"] = (state == Qt.Checked)
+        self.settings_manager.save()
+
+    def on_mvol_changed(self, v):
+        self.settings_manager.settings["music_volume"] = v
+        self.settings_manager.save()
+        if hasattr(self, 'audio_manager'):
+            self.audio_manager.set_music_volume(v / 100.0)
+
+    def on_svol_changed(self, v):
+        self.settings_manager.settings["sfx_volume"] = v
+        self.settings_manager.save()
+        if hasattr(self, 'audio_manager'):
+            self.audio_manager.set_sfx_volume(v / 100.0)
+
+    def on_para_changed(self, v):
+        self.settings_manager.settings["max_parallel_analysis"] = v
+        self.settings_manager.save()
+        if self.analysis_manager:
+            self.analysis_manager.set_max_threads(v)
+
+    
+    def sync_sliders_to_preset(self):
+        diff = self.diff_combo.currentText()
+        presets = {
+            "Easy": {"speed": 350, "chord": 0, "hold": 15},
+            "Normal": {"speed": 500, "chord": 0, "hold": 15},
+            "Hard": {"speed": 700, "chord": 15, "hold": 15},
+            "Insane": {"speed": 900, "chord": 25, "hold": 15},
+            "Impossible": {"speed": 1200, "chord": 25, "hold": 15},
+            "God": {"speed": 1600, "chord": 35, "hold": 15},
+            "Beyond": {"speed": 2100, "chord": 35, "hold": 15}
+        }
+        if diff in presets:
+            p = presets[diff]
+            self.speed_slider.blockSignals(True)
+            self.chord_slider.blockSignals(True)
+            self.hold_slider.blockSignals(True)
+            self.speed_slider.setValue(p["speed"])
+            self.chord_slider.setValue(p["chord"])
+            self.hold_slider.setValue(p["hold"])
+            self.speed_slider.blockSignals(False)
+            self.chord_slider.blockSignals(False)
+            self.hold_slider.blockSignals(False)
+            
+            # Update visuals manually
+            self.speed_label.setText(f"Scroll Speed: {p['speed']}")
+            self.chord_label.setText(f"Chord %: {p['chord']}")
+            self.hold_label.setText(f"Hold %: {p['hold']}")
+            
+    def update_stars(self):
+        pass
+
+
+    def show_results(self, results):
+        print(f"DEBUG: Showing Results Dialog for {results.get('song')}")
+        dlg = ResultsDialog(results, self)
+        dlg.exec_()
+            
+
+def run_menu(songs, audio_manager, discord_rpc=None, results=None):
+    print(f"DEBUG source run_menu: results={results}")
+    app = QApplication.instance()
+    if not app:
+        app = QApplication(sys.argv)
+    
+    # Font Loader could go here
+    
+    # Store results for return
+    result = {"song": None, "songs": [], "diff": "Normal", "beats": [], "custom": {}, "metadata": {}, "library": []}
+    
+    window = ModernMenuQt(songs, audio_manager, discord_rpc, results)
+    window.show()
+    
+    def handle_ready(song, diff, beats, custom, metadata):
+        result["song"] = song
+        result["diff"] = diff
+        result["beats"] = beats
+        result["custom"] = custom
+        result["metadata"] = metadata
+        result["library"] = window.songs
+        window.close()
+
+    def handle_playlist(songs, diff, custom):
+        result["songs"] = songs
+        result["diff"] = diff
+        result["custom"] = custom
+        result["library"] = window.songs
+        window.close()
+    
+    window.song_ready.connect(handle_ready)
+    window.playlist_ready.connect(handle_playlist)
+    app.exec_()
+    
+    if result["songs"]:
+        return result["songs"], result["diff"], [], result["custom"], result["metadata"], result["library"]
+    return result["song"], result["diff"], result["beats"], result["custom"], result["metadata"], result["library"]
