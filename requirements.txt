@@ -2,3 +2,9 @@ pygame
 PyQt5
 librosa
 numpy
+mutagen
+pypresence
+spotipy
+python-dotenv
+yt-dlp
+imageio-ffmpeg
